@@ -46,8 +46,11 @@ def extract_index_composition(table_parse_tree: bS) -> {}:
             if len(cells) == 5:
 
                 #  Create dictionary to store a symbols price history dictionary
-                #  Example => {'CCC': {'volume_traded': 5, 'dollar_change': 1.50, ......}}
-                symbol = utils.parser.extract_cell_value(cells[0], True, True)
+                #  Example => {'Carib Cement': {'volume_traded': 5, 'dollar_change': 1.50, ......}}
+
+                link = cells[0].find("a")
+                symbol_name = link['title'].strip()
+
                 index_composition = dict()
 
                 index_composition[constants.VOLUME] = locale.atoi(utils.parser.extract_cell_value(cells[4]))
@@ -57,7 +60,7 @@ def extract_index_composition(table_parse_tree: bS) -> {}:
                     utils.parser.extract_cell_value(cells[3]).replace("%", ""))
                 index_composition[constants.LAST_UPDATED_DATE] = datetime.now()
 
-                index_composition_data.setdefault(symbol, {}).update(index_composition)
+                index_composition_data.setdefault(symbol_name, {}).update(index_composition)
             else:
                 raise custom_exception.TableNotFoundError(table_name='Price History')
 
