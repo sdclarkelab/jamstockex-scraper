@@ -10,6 +10,9 @@ import utils.parser
 from stock.stock_info import parser as stock_info_parser
 from utils import urls, log
 
+import time
+import random
+
 
 def main(stock_info_col: MongoClient):
     """
@@ -33,6 +36,10 @@ def main(stock_info_col: MongoClient):
             market_parse_trees = []
             for market_url in market_urls:
                 market_parse_trees.append(utils.parser.get_parse_tree(url=market_url, timeout_retry_num=3))
+
+                delays = [7, 4, 6, 2, 10, 19]
+                delay = random.choice(delays)
+                time.sleep(delay)
 
             #  Extract stock info from market page content
             stock_info_list = stock_info_parser.extract_stock_info(market_parse_trees)
