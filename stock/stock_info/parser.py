@@ -1,5 +1,7 @@
 import logging
 import sys
+import pytz
+
 from datetime import datetime
 from urllib.parse import urljoin
 
@@ -75,6 +77,7 @@ def _get_stocks(table_parse_tree: bS, market_type: str, is_listed: bool) -> [{}]
     """
 
     stocks = list()
+    tz = pytz.timezone(constants.JA_TIMEZONE)
 
     try:
 
@@ -84,7 +87,7 @@ def _get_stocks(table_parse_tree: bS, market_type: str, is_listed: bool) -> [{}]
             if len(cells) == 6:
                 stock = dict()
 
-                stock[constants.LAST_UPDATED_DATE] = datetime.now()
+                stock[constants.LAST_UPDATED_DATE] = datetime.now(tz)
                 stock[constants.INSTRUMENT_NAME] = utils.parser.extract_cell_value(cell=cells[0])
                 stock[constants.SYMBOL] = utils.parser.extract_cell_value(cell=cells[1]).replace('%', '')
                 stock[constants.CURRENCY] = utils.parser.extract_cell_value(cell=cells[2])
