@@ -3,6 +3,7 @@
 import locale
 import logging
 import sys
+import pytz
 from datetime import datetime
 
 from bs4 import BeautifulSoup as bS
@@ -34,6 +35,8 @@ def extract_index_composition(table_parse_tree: bS) -> {}:
     #  Set currency
     locale.setlocale(locale.LC_ALL, 'en_US.UTF-8')
 
+    tz = pytz.timezone(constants.JA_TIMEZONE)
+
     try:
 
         index_composition_data = dict()
@@ -58,7 +61,7 @@ def extract_index_composition(table_parse_tree: bS) -> {}:
                 index_composition[constants.MARKET_PRICE] = locale.atof(utils.parser.extract_cell_value(cells[1]))
                 index_composition[constants.PERCENT_CHANGE] = locale.atof(
                     utils.parser.extract_cell_value(cells[3]).replace("%", ""))
-                index_composition[constants.LAST_UPDATED_DATE] = datetime.now()
+                index_composition[constants.LAST_UPDATED_DATE] = datetime.now(tz)
 
                 index_composition_data.setdefault(symbol_name, {}).update(index_composition)
             else:
