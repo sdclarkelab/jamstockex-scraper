@@ -1,7 +1,8 @@
 # Created by Stephen Clarke at 07-Jul-19
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timezone
+import pytz
 
 from pymongo import MongoClient
 
@@ -27,10 +28,14 @@ def update_stock_price_history(stock_info_col: MongoClient, price_history_data: 
     try:
         logging.info('Updating stock price history .... ')
 
+        jamaica = pytz.timezone('Jamaica')
+        t = datetime.now(tz=jamaica)
+        current_time = datetime(t.year, t.month, t.day, t.hour, t.minute, t.second, t.microsecond, tzinfo=timezone.utc)
+
         for symbol, extracted_data in price_history_data.items():
             query = {constants.INSTRUMENT_NAME: symbol}
 
-            new_values = {'$set': {'trade_info': extracted_data, 'last_updated_date': datetime.now()}}
+            new_values = {'$set': {'trade_info': extracted_data, 'last_updated_date': current_time}}
             stock_info_col.update_one(query, new_values, upsert=True)
         logging.info('Successfully updated stock price history')
 
@@ -43,9 +48,13 @@ def update_stock_dividend(stock_info_col: MongoClient, dividend_data: {}):
     try:
         logging.info('Updating stock dividend .... ')
 
+        jamaica = pytz.timezone('Jamaica')
+        t = datetime.now(tz=jamaica)
+        current_time = datetime(t.year, t.month, t.day, t.hour, t.minute, t.second, t.microsecond, tzinfo=timezone.utc)
+
         for k, v in dividend_data.items():
             query = {'symbol': k}
-            new_values = {'$set': {'dividends': v, 'last_updated_date': datetime.now()}}
+            new_values = {'$set': {'dividends': v, 'last_updated_date': current_time}}
             stock_info_col.update_one(query, new_values, upsert=True)
         logging.info('Successfully updated stock dividends')
 
