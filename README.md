@@ -1,6 +1,23 @@
-# Jamstockex-scraper
+# StockWatchJa: JamStockEx Scraper
 
-This project scrapes the [Jamaica Stock Exchange](https://www.jamstockex.com/)  website using Python, then saves the data in MongoDB
+The **StockWatchJa: JamStockEx Scraper** scrapes the [Jamaica Stock Exchange](https://www.jamstockex.com/) website daily using Python and saves to a MongoDB collection.
+The data is then served as JSON by **[StockWatchJA: JamStockEx API](https://github.com/sdclarkelab/jamstockex-api)** at this [URL](http://jamstockexapi.stockwatchja.com/stocks).
+
+#####The following stock data is scraped:
+- All Listed Stocks
+- Dividends pending payout dates
+- Stock details:
+    - Name
+    - Instrument Code
+    - Currency
+    - Sector
+    - Type
+    - Website
+    - Market
+    - Volume Traded
+    - Dollar Change
+    - Market Price
+    - Percentage Change
 
 
 ## Requirements
@@ -15,13 +32,16 @@ Windows OS| 10 | - |
 
 ### Installation
 1. Install GIT
-2. [Install Heroku](https://devcenter.heroku.com/articles/getting-started-with-python#set-up)
-3. Login using the following command
+2. [Install Heroku on local machine](https://devcenter.heroku.com/articles/getting-started-with-python#set-up)
+
+
+### Prepare Heroku to receive source code
+
+#### Login to Heroku on local machine
+Login using the following command
 ```shell script
 heroku login
 ```
-
-### Prepare Heroku to recieve source code
 
 #### Create Secrets.json file
 Create ".env" in application root folder
