@@ -18,7 +18,7 @@ The data is then served as JSON by **[StockWatchJA: JamStockEx API](https://gith
     - Dollar Change
     - Market Price
     - Percentage Change
- 
+
 
 ## Requirements
 Tool | Version  | Source |
