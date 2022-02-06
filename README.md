@@ -3,7 +3,6 @@
 The **StockWatchJa: JamStockEx Scraper** scrapes the [Jamaica Stock Exchange](https://www.jamstockex.com/) website daily using Python and saves to a MongoDB collection.
 The data is then served as JSON by **[StockWatchJA: JamStockEx API](https://github.com/sdclarkelab/jamstockex-api)** at this [URL](http://jamstockexapi.stockwatchja.com/stocks).
 
-
 #### The following stock data is scraped:
 - All Listed Stocks
 - Dividends pending payout dates
