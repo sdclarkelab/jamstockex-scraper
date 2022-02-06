@@ -24,8 +24,8 @@ def get_corporate_actions(instrument_code, start_date, current_date, retry_num):
 
 def _extract_corporate_actions(parse_tree):
     corporate_action_data = dict()
+    table = helper.find_tables(parse_tree)
 
-    table = parse_tree.find('table')
     for row in table.findAll('tr')[1:]:
         unformatted_cells = row.findAll("td")
         cells = helper.Cells(unformatted_cells)

@@ -44,7 +44,7 @@ class Database:
                 raise Exception("Missing scraped data")
 
             update_db = {
-                constants.LISTED_COMPANIES_RESOURCE: self._update_stock_info,
+                constants.LISTED_COMPANIES_RESOURCE: self._update_stock,
                 constants.SUMMARY_RESOURCE: self._update_stock_trade_summary,
                 constants.CORPORATE_ACTION_RESOURCE: self._update_stock_corporate_actions
             }
@@ -54,22 +54,33 @@ class Database:
             logger.info('Successfully updated collection.')
 
         except Exception as e:
-            raise e
+            logger.error(e)
 
-    def _update_stock_info(self, stock_info):
+    def _update_stock(self, listed_companies):
 
         try:
-            for stock_keys in stock_info.keys():
-                for stock in stock_info[stock_keys]:
-                    query = {constants.INSTRUMENT_NAME: stock[constants.INSTRUMENT_NAME]}
-                    self.stock_collection.update_one(query, {"$set": stock}, upsert=True)
+            if listed_companies is None:
+                raise Exception('No data found.')
+
+            for listed_company in listed_companies:
+                if listed_company is None:
+                    raise Exception('No data found.')
+
+                query = {constants.INSTRUMENT_CODE: listed_company[constants.INSTRUMENT_CODE]}
+                self.stock_collection.update_one(query, {"$set": listed_company}, upsert=True)
 
         except Exception as e:
-            logger.error(e)
+            raise e
 
     def _update_stock_trade_summary(self, stock_trade_summary):
         try:
+            if stock_trade_summary is None:
+                raise Exception('No data found.')
+
             for stock_summary in stock_trade_summary["stocks"]:
+                if stock_summary is None:
+                    raise Exception('No data found.')
+
                 query = {constants.INSTRUMENT_CODE: stock_summary[constants.INSTRUMENT_CODE]}
 
                 new_values = {'$set': {'trade_info': stock_summary['trade_info']}}
@@ -80,8 +91,15 @@ class Database:
 
     def _update_stock_corporate_actions(self, corporate_actions):
         try:
+            if corporate_actions is None:
+                raise Exception('No data found.')
+
             for instrument_code, action_data in corporate_actions.items():
+                if action_data is None:
+                    raise Exception('No data found.')
                 for action_name, data in action_data.items():
+                    if data is None:
+                        raise Exception('No data found.')
                     query = {constants.INSTRUMENT_CODE: instrument_code}
 
                     new_values = {'$set': {

@@ -9,28 +9,25 @@ urls = URLS()
 
 
 def get_listed_companies(markets, retry_num):
-    security_data = dict()
+    security_data = list()
 
     try:
         for market in markets:
             url = urls.get_formatted_resource_url(constants.LISTED_COMPANIES_RESOURCE, market)
 
             parse_tree = helper.get_parse_tree(url, retry_num)
-            security_data[market] = _extract_listed_companies_data(parse_tree, market)
+
+            security_data.extend(_extract_listed_companies_data(parse_tree, market))
 
         return security_data
     except Exception as e:
-        raise
+        logger.error(e)
 
 
 def _extract_listed_companies_data(parse_tree, market):
     try:
         listed_companies = list()
-
-        table = parse_tree.find('table')
-
-        if table is None:
-            raise Exception("Table is missing")
+        table = helper.find_tables(parse_tree)
 
         # Ignore table header
         for row in table.findAll('tr')[1:]:
@@ -58,4 +55,3 @@ def _extract_listed_companies_data(parse_tree, market):
         return listed_companies
     except Exception as e:
         logger.error(e)
-        raise

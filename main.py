@@ -13,4 +13,4 @@ if __name__ == "__main__":
         scraper_factory.scrape(resource_name=constants.CORPORATE_ACTION_RESOURCE, retry_num=2)
 
     except Exception as e:
-        logger.exception(e)
+        logger.error(e)
