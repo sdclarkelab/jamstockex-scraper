@@ -23,25 +23,9 @@ The data is then served as JSON by **[StockWatchJA: JamStockEx API](https://gith
 ## Requirements
 Tool | Version  | Source |
 --- | --- | --- |
-Python |3.7.4| [Python 3.7.4 Release](https://www.python.org/downloads/release/python-374/)|
-Heroku|-|[Getting Started on Heroku with Python](https://devcenter.heroku.com/articles/getting-started-with-python)|
+Python |3.7.0| [Python 3.7.0 Release](https://www.python.org/downloads/release/python-370/)|
 Windows OS| 10 | - |
 
-
-## Heroku Setup
-
-### Installation
-1. Install GIT
-2. [Install Heroku on local machine](https://devcenter.heroku.com/articles/getting-started-with-python#set-up)
-
-
-### Prepare Heroku to receive source code
-
-#### Login to Heroku on local machine
-Login using the following command
-```shell script
-heroku login
-```
 
 #### Create Secrets.json file
 Create ".env" in application root folder
@@ -54,40 +38,6 @@ STOCK_COL=stock
 
 #### Initialize database
 ```shell script
-python initialize_database.py
+python main.py
 ```
 
-#### Create Heroku project in Heroku
-```shell script
-heroku create jamstockex-scraper
-```
-
-#### Set Heroku environment variables
-```shell script
-python heroku-config.py
-```
-
-### Deploy 
-```shell script
-git push heroku your_local_branch_name:master
-```
-Validate that the application is live
-```shell script
-heroku ps:scale clock=1
-```
-
-# Test locally
-Do the following to the stock_handler.py file:
-``` python
-    #  Get environment variables
-    # mongoDB_connection_str = os.environ['DB_CONN_STR']
-    # mongoDB_name = os.environ['DB_NAME']
-    # stock_col = os.environ['STOCK_COL']
-
-    mongoDB_connection_str = "<MongoDB-node-2.2.12-connection-string>"
-    mongoDB_name = "stockwatch"
-    stock_col = "stock"
-    
-    """ some code """
-    # End of file
-```
