@@ -18,12 +18,12 @@ def get_trade_summaries(current_date, retry_num):
         return trade_summaries
 
     except Exception as e:
-        raise
+        logger.error(e)
 
 
 def _extract_trade_summaries(parse_tree):
     try:
-        tables = parse_tree.findAll('table')
+        tables = helper.find_tables(parse_tree, is_find_all=True)
 
         trade_summaries = {
             'indices': _extract_indices_summary(tables[0]),
@@ -32,7 +32,7 @@ def _extract_trade_summaries(parse_tree):
 
         return trade_summaries
     except Exception as e:
-        raise
+        logger.error(e)
 
 
 def _extract_indices_summary(table):
