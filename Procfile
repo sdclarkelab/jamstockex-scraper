@@ -1,1 +1,0 @@
-clock: python stock_handler.py
