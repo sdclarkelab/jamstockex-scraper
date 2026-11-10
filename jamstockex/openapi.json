@@ -1,0 +1,842 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "JSE data API (local)",
+    "version": "2.0.0",
+    "description": "Jamaica Stock Exchange end-of-day data kept in a local file and served only on this computer (127.0.0.1). Read-only.\n\nData: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group. Personal, noncommercial use only. Not financial advice.\n\nFilters are exact, case-insensitive matches. An unknown filter or an invalid boolean returns 400. Requests whose Host header is not 127.0.0.1:<port> or localhost:<port> get 403.",
+    "license": {"name": "PolyForm Noncommercial 1.0.0", "identifier": "PolyForm-Noncommercial-1.0.0"}
+  },
+  "servers": [{"url": "/", "description": "This app, on 127.0.0.1"}],
+  "tags": [
+    {"name": "data", "description": "JSE end-of-day data"},
+    {"name": "docs", "description": "This documentation"}
+  ],
+  "paths": {
+    "/": {
+      "get": {
+        "operationId": "root",
+        "summary": "Redirects to /docs",
+        "tags": ["docs"],
+        "responses": {
+          "302": {
+            "description": "Redirect to /docs",
+            "headers": {"Location": {"schema": {"type": "string", "example": "/docs"}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        }
+      }
+    },
+    "/docs": {
+      "get": {
+        "operationId": "docs",
+        "summary": "Swagger UI",
+        "tags": ["docs"],
+        "responses": {
+          "200": {
+            "description": "The Swagger UI page",
+            "content": {"text/html": {"schema": {"type": "string"}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        }
+      }
+    },
+    "/docs/assets/{file}": {
+      "get": {
+        "operationId": "docsAsset",
+        "summary": "A Swagger UI asset",
+        "tags": ["docs"],
+        "responses": {
+          "200": {
+            "description": "The file",
+            "content": {
+              "text/javascript": {"schema": {"type": "string"}},
+              "text/css": {"schema": {"type": "string"}}
+            }
+          },
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        },
+        "parameters": [
+          {
+            "name": "file",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string", "enum": ["swagger-ui-bundle.js", "swagger-ui.css", "docs-init.js"]},
+            "example": "swagger-ui.css"
+          }
+        ]
+      }
+    },
+    "/openapi.json": {
+      "get": {
+        "operationId": "openapi",
+        "summary": "This OpenAPI document",
+        "tags": ["docs"],
+        "responses": {
+          "200": {
+            "description": "OpenAPI 3.1 document",
+            "content": {"application/json": {"schema": {"type": "object"}}}
+          },
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        }
+      }
+    },
+    "/v2/": {
+      "get": {
+        "operationId": "index",
+        "summary": "Endpoint list",
+        "tags": ["data"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["meta", "data"],
+                  "properties": {
+                    "meta": {"$ref": "#/components/schemas/Meta"},
+                    "data": {"$ref": "#/components/schemas/ApiIndex"}
+                  }
+                },
+                "example": {
+                  "meta": {
+                    "api_version": "v2",
+                    "as_of": "2026-11-09",
+                    "saved_at": "2026-11-09T22:31:04Z",
+                    "stale": false,
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  },
+                  "data": {
+                    "name": "jamstockex",
+                    "api_version": "v2",
+                    "endpoints": {
+                      "status": "/v2/status",
+                      "stocks": "/v2/stocks",
+                      "stock": "/v2/stocks/{instrument_code}",
+                      "indices": "/v2/indices",
+                      "corporate_actions": "/v2/corporate-actions",
+                      "dividends": "/v2/dividends",
+                      "docs": "/docs",
+                      "openapi": "/openapi.json"
+                    },
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  }
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        }
+      }
+    },
+    "/v2/status": {
+      "get": {
+        "operationId": "status",
+        "summary": "Freshness of each dataset and of the refresh",
+        "tags": ["data"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["meta", "data"],
+                  "properties": {
+                    "meta": {"$ref": "#/components/schemas/Meta"},
+                    "data": {"$ref": "#/components/schemas/Status"}
+                  }
+                },
+                "example": {
+                  "meta": {
+                    "api_version": "v2",
+                    "as_of": "2026-11-09",
+                    "saved_at": "2026-11-09T22:31:04Z",
+                    "stale": false,
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  },
+                  "data": {
+                    "listings": {
+                      "as_of": "2026-11-09",
+                      "fetched_at": "2026-11-09T22:31:02Z",
+                      "stale": false,
+                      "last_error": null,
+                      "markets": {
+                        "Main Market": {
+                          "as_of": "2026-11-09",
+                          "fetched_at": "2026-11-09T22:31:02Z",
+                          "stale": false,
+                          "last_error": null
+                        }
+                      },
+                      "unmatched_codes": []
+                    },
+                    "quotes": {
+                      "as_of": "2026-11-09",
+                      "fetched_at": "2026-11-09T22:31:02Z",
+                      "stale": false,
+                      "last_error": null
+                    },
+                    "indices": {
+                      "as_of": "2026-11-09",
+                      "fetched_at": "2026-11-09T22:31:02Z",
+                      "stale": false,
+                      "last_error": null
+                    },
+                    "corporate_actions": {
+                      "as_of": "2026-11-09",
+                      "fetched_at": "2026-11-09T22:31:02Z",
+                      "stale": false,
+                      "last_error": null
+                    },
+                    "refreshing": false,
+                    "blocked": false,
+                    "next_check_at": "2026-11-09T22:46:04Z",
+                    "data_file": "/Users/you/Library/Application Support/jamstockex/jse-data.json"
+                  }
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        },
+        "description": "`stale` is true when that dataset's latest due fetch failed, or when 3 trading days in a row returned no trade data (quotes and indices); `last_error` says why. `blocked` is true after the JSE site blocked an automated request; stored data is still served."
+      }
+    },
+    "/v2/stocks": {
+      "get": {
+        "operationId": "listStocks",
+        "summary": "All instruments with their latest quote",
+        "tags": ["data"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["meta", "data"],
+                  "properties": {
+                    "meta": {"$ref": "#/components/schemas/Meta"},
+                    "data": {"type": "array", "items": {"$ref": "#/components/schemas/Stock"}}
+                  }
+                },
+                "example": {
+                  "meta": {
+                    "api_version": "v2",
+                    "as_of": "2026-11-09",
+                    "saved_at": "2026-11-09T22:31:04Z",
+                    "stale": false,
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  },
+                  "data": [
+                    {
+                      "instrument_code": "9001",
+                      "symbol": "ACME",
+                      "name": "Acme Holdings Limited",
+                      "market": "Main Market",
+                      "currency": "JMD",
+                      "sector": "Manufacturing",
+                      "type": "Ordinary",
+                      "website": "https://www.acme.example",
+                      "listed": true,
+                      "listed_since": "2026-11-09",
+                      "delisted_on": null,
+                      "quote": {
+                        "date": "2026-11-09",
+                        "close": 12.5,
+                        "change": -0.25,
+                        "change_pct": -1.96,
+                        "volume": 48213
+                      }
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        },
+        "description": "Sorted by instrument_code. A company listed in two currencies has one symbol and two instruments.",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "description": "Exact symbol, e.g. ACME",
+            "schema": {"type": "string"}
+          },
+          {
+            "name": "market",
+            "in": "query",
+            "required": false,
+            "description": "Exact market label, e.g. Main Market",
+            "schema": {"type": "string"}
+          },
+          {
+            "name": "listed",
+            "in": "query",
+            "required": false,
+            "description": "true for listed instruments, false for delisted ones",
+            "schema": {"type": "string", "enum": ["true", "false"]}
+          }
+        ]
+      }
+    },
+    "/v2/stocks/{instrument_code}": {
+      "get": {
+        "operationId": "getStock",
+        "summary": "One instrument with its corporate actions and dividends",
+        "tags": ["data"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["meta", "data"],
+                  "properties": {
+                    "meta": {"$ref": "#/components/schemas/Meta"},
+                    "data": {"$ref": "#/components/schemas/StockDetail"}
+                  }
+                },
+                "example": {
+                  "meta": {
+                    "api_version": "v2",
+                    "as_of": "2026-11-09",
+                    "saved_at": "2026-11-09T22:31:04Z",
+                    "stale": false,
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  },
+                  "data": {
+                    "instrument_code": "9001",
+                    "symbol": "ACME",
+                    "name": "Acme Holdings Limited",
+                    "market": "Main Market",
+                    "currency": "JMD",
+                    "sector": "Manufacturing",
+                    "type": "Ordinary",
+                    "website": "https://www.acme.example",
+                    "listed": true,
+                    "listed_since": "2026-11-09",
+                    "delisted_on": null,
+                    "quote": {
+                      "date": "2026-11-09",
+                      "close": 12.5,
+                      "change": -0.25,
+                      "change_pct": -1.96,
+                      "volume": 48213
+                    },
+                    "corporate_actions": [
+                      {
+                        "instrument_code": "9001",
+                        "symbol": "ACME",
+                        "type": "dividend",
+                        "amount": 0.75,
+                        "currency": "JMD",
+                        "record_date": "2026-11-20",
+                        "ex_date": "2026-11-18",
+                        "payment_date": "2026-12-04"
+                      }
+                    ],
+                    "dividends": [
+                      {
+                        "instrument_code": "9001",
+                        "symbol": "ACME",
+                        "type": "dividend",
+                        "amount": 0.75,
+                        "currency": "JMD",
+                        "record_date": "2026-11-20",
+                        "ex_date": "2026-11-18",
+                        "payment_date": "2026-12-04"
+                      }
+                    ]
+                  }
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "404": {"$ref": "#/components/responses/NotFound"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        },
+        "description": "`meta.stale` is true when quotes or this instrument's market is stale.",
+        "parameters": [
+          {
+            "name": "instrument_code",
+            "in": "path",
+            "required": true,
+            "schema": {"type": "string"},
+            "example": "9001"
+          }
+        ]
+      }
+    },
+    "/v2/indices": {
+      "get": {
+        "operationId": "listIndices",
+        "summary": "Market indices",
+        "tags": ["data"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["meta", "data"],
+                  "properties": {
+                    "meta": {"$ref": "#/components/schemas/Meta"},
+                    "data": {"type": "array", "items": {"$ref": "#/components/schemas/MarketIndex"}}
+                  }
+                },
+                "example": {
+                  "meta": {
+                    "api_version": "v2",
+                    "as_of": "2026-11-09",
+                    "saved_at": "2026-11-09T22:31:04Z",
+                    "stale": false,
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  },
+                  "data": [
+                    {
+                      "name": "JSE Main Index",
+                      "date": "2026-11-09",
+                      "value": 325456.78,
+                      "change": -1234.56,
+                      "change_pct": -0.38,
+                      "volume": 12345678
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        }
+      }
+    },
+    "/v2/corporate-actions": {
+      "get": {
+        "operationId": "listCorporateActions",
+        "summary": "All corporate actions",
+        "tags": ["data"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["meta", "data"],
+                  "properties": {
+                    "meta": {"$ref": "#/components/schemas/Meta"},
+                    "data": {"type": "array", "items": {"$ref": "#/components/schemas/CorporateAction"}}
+                  }
+                },
+                "example": {
+                  "meta": {
+                    "api_version": "v2",
+                    "as_of": "2026-11-09",
+                    "saved_at": "2026-11-09T22:31:04Z",
+                    "stale": false,
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  },
+                  "data": [
+                    {
+                      "instrument_code": "9001",
+                      "symbol": "ACME",
+                      "type": "dividend",
+                      "amount": 0.75,
+                      "currency": "JMD",
+                      "record_date": "2026-11-20",
+                      "ex_date": "2026-11-18",
+                      "payment_date": "2026-12-04"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        },
+        "description": "Sorted by record_date, then symbol. Actions are never deleted.",
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "description": "Exact symbol, e.g. ACME",
+            "schema": {"type": "string"}
+          },
+          {
+            "name": "type",
+            "in": "query",
+            "required": false,
+            "description": "Exact action type, e.g. dividend or stock_split",
+            "schema": {"type": "string"}
+          }
+        ]
+      }
+    },
+    "/v2/dividends": {
+      "get": {
+        "operationId": "listDividends",
+        "summary": "Dividends (corporate actions with type dividend)",
+        "tags": ["data"],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "required": ["meta", "data"],
+                  "properties": {
+                    "meta": {"$ref": "#/components/schemas/Meta"},
+                    "data": {"type": "array", "items": {"$ref": "#/components/schemas/CorporateAction"}}
+                  }
+                },
+                "example": {
+                  "meta": {
+                    "api_version": "v2",
+                    "as_of": "2026-11-09",
+                    "saved_at": "2026-11-09T22:31:04Z",
+                    "stale": false,
+                    "source": "Data: Jamaica Stock Exchange Limited (jamstockex.com). All rights in the data belong to the JSE Group.",
+                    "notice": "Personal, noncommercial use only. Not financial advice.",
+                    "license": "Code: PolyForm Noncommercial 1.0.0"
+                  },
+                  "data": [
+                    {
+                      "instrument_code": "9001",
+                      "symbol": "ACME",
+                      "type": "dividend",
+                      "amount": 0.75,
+                      "currency": "JMD",
+                      "record_date": "2026-11-20",
+                      "ex_date": "2026-11-18",
+                      "payment_date": "2026-12-04"
+                    }
+                  ]
+                }
+              }
+            }
+          },
+          "400": {"$ref": "#/components/responses/BadRequest"},
+          "403": {"$ref": "#/components/responses/Forbidden"},
+          "405": {"$ref": "#/components/responses/MethodNotAllowed"},
+          "500": {"$ref": "#/components/responses/ServerError"}
+        },
+        "parameters": [
+          {
+            "name": "symbol",
+            "in": "query",
+            "required": false,
+            "description": "Exact symbol, e.g. ACME",
+            "schema": {"type": "string"}
+          },
+          {
+            "name": "upcoming",
+            "in": "query",
+            "required": false,
+            "description": "true: payment date is today or later in Jamaica; false: the rest",
+            "schema": {"type": "string", "enum": ["true", "false"]}
+          }
+        ]
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "Meta": {
+        "type": "object",
+        "required": ["api_version", "as_of", "saved_at", "stale", "source", "notice", "license"],
+        "properties": {
+          "api_version": {"type": "string", "const": "v2"},
+          "as_of": {
+            "type": ["string", "null"],
+            "format": "date",
+            "description": "Trading date of the data in this response"
+          },
+          "saved_at": {
+            "type": ["string", "null"],
+            "format": "date-time",
+            "description": "When the local data file was last saved (UTC)"
+          },
+          "stale": {"type": "boolean", "description": "True if the dataset's latest due fetch failed"},
+          "source": {"type": "string"},
+          "notice": {"type": "string"},
+          "license": {"type": "string"}
+        }
+      },
+      "Quote": {
+        "type": "object",
+        "required": ["date", "close", "change", "change_pct", "volume"],
+        "properties": {
+          "date": {"type": "string", "format": "date"},
+          "close": {"type": ["number", "null"]},
+          "change": {"type": ["number", "null"]},
+          "change_pct": {
+            "type": ["number", "null"],
+            "description": "From the page, otherwise change / (close - change) x 100"
+          },
+          "volume": {"type": ["integer", "null"]}
+        }
+      },
+      "Stock": {
+        "type": "object",
+        "required": [
+          "instrument_code",
+          "symbol",
+          "name",
+          "market",
+          "currency",
+          "sector",
+          "type",
+          "website",
+          "listed",
+          "listed_since",
+          "delisted_on",
+          "quote"
+        ],
+        "properties": {
+          "instrument_code": {"type": "string"},
+          "symbol": {"type": "string"},
+          "name": {"type": "string"},
+          "market": {"type": "string"},
+          "currency": {"type": ["string", "null"]},
+          "sector": {"type": ["string", "null"]},
+          "type": {"type": ["string", "null"]},
+          "website": {"type": ["string", "null"], "description": "The company's own website"},
+          "listed": {"type": "boolean"},
+          "listed_since": {"type": ["string", "null"], "format": "date"},
+          "delisted_on": {"type": ["string", "null"], "format": "date"},
+          "quote": {"oneOf": [{"$ref": "#/components/schemas/Quote"}, {"type": "null"}]}
+        }
+      },
+      "StockDetail": {
+        "allOf": [
+          {"$ref": "#/components/schemas/Stock"},
+          {
+            "type": "object",
+            "required": ["corporate_actions", "dividends"],
+            "properties": {
+              "corporate_actions": {
+                "type": "array",
+                "items": {"$ref": "#/components/schemas/CorporateAction"}
+              },
+              "dividends": {"type": "array", "items": {"$ref": "#/components/schemas/CorporateAction"}}
+            }
+          }
+        ]
+      },
+      "CorporateAction": {
+        "type": "object",
+        "required": [
+          "instrument_code",
+          "symbol",
+          "type",
+          "amount",
+          "currency",
+          "record_date",
+          "ex_date",
+          "payment_date"
+        ],
+        "properties": {
+          "instrument_code": {
+            "type": ["string", "null"],
+            "description": "null when the symbol is unknown or ambiguous"
+          },
+          "symbol": {"type": "string"},
+          "type": {"type": "string", "description": "lowercase snake_case, e.g. dividend"},
+          "amount": {"type": ["number", "null"]},
+          "currency": {"type": ["string", "null"]},
+          "record_date": {"type": ["string", "null"], "format": "date"},
+          "ex_date": {"type": ["string", "null"], "format": "date"},
+          "payment_date": {"type": ["string", "null"], "format": "date"}
+        }
+      },
+      "MarketIndex": {
+        "type": "object",
+        "required": ["name", "date", "value", "change", "change_pct", "volume"],
+        "properties": {
+          "name": {"type": "string"},
+          "date": {"type": "string", "format": "date"},
+          "value": {"type": ["number", "null"]},
+          "change": {"type": ["number", "null"]},
+          "change_pct": {"type": ["number", "null"]},
+          "volume": {"type": ["integer", "null"]}
+        },
+        "title": "MarketIndex"
+      },
+      "DatasetStatus": {
+        "type": "object",
+        "required": ["as_of", "fetched_at", "stale", "last_error"],
+        "properties": {
+          "as_of": {"type": ["string", "null"], "format": "date"},
+          "fetched_at": {"type": ["string", "null"], "format": "date-time"},
+          "stale": {"type": "boolean"},
+          "last_error": {"type": ["string", "null"]},
+          "no_data_days": {"type": "integer", "minimum": 1, "description": "Quotes only, present when above 0: trading-day refreshes in a row whose page had no trade data. At 3, quotes and indices are marked stale."}
+        }
+      },
+      "Status": {
+        "type": "object",
+        "required": [
+          "listings",
+          "quotes",
+          "indices",
+          "corporate_actions",
+          "refreshing",
+          "blocked",
+          "next_check_at",
+          "data_file"
+        ],
+        "properties": {
+          "listings": {
+            "allOf": [
+              {"$ref": "#/components/schemas/DatasetStatus"},
+              {
+                "type": "object",
+                "required": ["markets", "unmatched_codes"],
+                "properties": {
+                  "markets": {
+                    "type": "object",
+                    "additionalProperties": {"$ref": "#/components/schemas/DatasetStatus"}
+                  },
+                  "unmatched_codes": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Quote codes that no listings page explained"
+                  }
+                }
+              }
+            ]
+          },
+          "quotes": {"$ref": "#/components/schemas/DatasetStatus"},
+          "indices": {"$ref": "#/components/schemas/DatasetStatus"},
+          "corporate_actions": {"$ref": "#/components/schemas/DatasetStatus"},
+          "refreshing": {"type": "boolean"},
+          "blocked": {"type": "boolean", "description": "The JSE site blocked the last automated request"},
+          "next_check_at": {"type": ["string", "null"], "format": "date-time"},
+          "data_file": {"type": "string"}
+        }
+      },
+      "ApiIndex": {
+        "type": "object",
+        "required": ["name", "api_version", "endpoints", "notice", "source", "license"],
+        "properties": {
+          "name": {"type": "string"},
+          "api_version": {"type": "string"},
+          "endpoints": {"type": "object", "additionalProperties": {"type": "string"}},
+          "notice": {"type": "string"},
+          "source": {"type": "string"},
+          "license": {"type": "string"}
+        }
+      },
+      "Error": {
+        "type": "object",
+        "required": ["error"],
+        "properties": {
+          "error": {
+            "type": "object",
+            "required": ["status", "message"],
+            "properties": {"status": {"type": "integer"}, "message": {"type": "string"}}
+          }
+        }
+      }
+    },
+    "responses": {
+      "BadRequest": {
+        "description": "Unknown filter, repeated filter or invalid boolean",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {
+              "error": {"status": 400, "message": "Unknown filter(s): sort; allowed: symbol, market, listed"}
+            }
+          }
+        }
+      },
+      "NotFound": {
+        "description": "No such endpoint, instrument or asset",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {"error": {"status": 404, "message": "Unknown instrument_code: 9099"}}
+          }
+        }
+      },
+      "MethodNotAllowed": {
+        "description": "Only GET is allowed",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {"error": {"status": 405, "message": "Method POST not allowed; this API is read-only"}}
+          }
+        },
+        "headers": {"Allow": {"schema": {"type": "string", "example": "GET"}}}
+      },
+      "ServerError": {
+        "description": "Unexpected error; details go to the console only",
+        "content": {
+          "application/json": {
+            "schema": {"$ref": "#/components/schemas/Error"},
+            "example": {"error": {"status": 500, "message": "Internal server error"}}
+          }
+        }
+      },
+      "Forbidden": {
+        "description": "The Host header is not 127.0.0.1:<port> or localhost:<port>",
+        "content": {
+          "text/plain": {
+            "schema": {"type": "string"},
+            "example": "Forbidden: this API only answers requests addressed to 127.0.0.1:8765 or localhost:8765.\n"
+          }
+        }
+      }
+    }
+  }
+}
