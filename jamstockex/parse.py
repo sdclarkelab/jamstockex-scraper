@@ -164,3 +164,56 @@ def parse_amount(text: str | None) -> tuple[str | None, Decimal | None]:
 
 def normalize_action_type(text: str | None) -> str:
     return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
+
+
+# --- listed companies ----------------------------------------------------
+
+LISTING_COLUMNS: Aliases = {
+    "name": ("security", "instrument", "instrumentname", "company", "name"),
+    "symbol": ("symbol", "ticker"),
+    "currency": ("currency",),
+    "sector": ("sector",),
+    "type": ("type", "instrumenttype", "securitytype"),
+    "website": ("website", "url"),
+}
+
+
+def _website(cells: list[Cell], idx: int | None) -> str | None:
+    href = cell_href(cells, idx)
+    if not href or not href.startswith(("http://", "https://")):
+        return None
+    if "jamstockex.com" in urlparse(href).netloc.lower():
+        return None
+    return href
+
+
+def parse_listed_companies(html: str, market_label: str) -> list[Company]:
+    page = extract_tables(html)
+    tables = matching_tables(page, LISTING_COLUMNS, ("name", "symbol"))
+    if not tables:
+        raise ParseError("listed-companies", "no table with 'security' and 'symbol' columns")
+    warn_missing_columns(f"listed-companies ({market_label})", [cols for _, cols in tables])
+    companies: dict[str, Company] = {}
+    skipped: set[tuple[str, ...]] = set()  # a row repeated in the mobile copy counts once
+    for table, cols in tables:
+        for row in data_rows(table):
+            cells = row.cells
+            code = row_instrument_code(row)
+            symbol = cell_text(cells, cols["symbol"])
+            if not code or not symbol:
+                skipped.add(tuple(cell.text for cell in cells))
+                continue
+            companies.setdefault(code, Company(
+                instrument_code=code,
+                symbol=symbol,
+                name=cell_text(cells, cols["name"]),
+                market=market_label,
+                currency=cell_text(cells, cols["currency"]) or None,
+                sector=cell_text(cells, cols["sector"]) or None,
+                type=cell_text(cells, cols["type"]) or None,
+                website=_website(cells, cols["website"]),
+            ))
+    if skipped:
+        log.warning("listed-companies (%s): skipped %d row(s) without an instrument link or symbol",
+                    market_label, len(skipped))
+    return list(companies.values())
