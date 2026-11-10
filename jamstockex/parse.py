@@ -317,3 +317,48 @@ def parse_trade_quotes(html: str, trade_date: dt.date) -> tuple[dict[str, Quote]
                 volume=to_int(cell_text(cells, cols["volume"])),
             ))
     return quotes, list(indices.values())
+
+
+# --- corporate actions ----------------------------------------------------
+
+ACTION_COLUMNS: Aliases = {
+    "symbol": ("instrument", "symbol", "security"),
+    "type": ("action", "corporateaction", "actiontype"),
+    "amount": ("dividendamount", "amount", "rate"),
+    "record_date": ("recorddate",),
+    "ex_date": ("exdate", "exdividenddate", "executiondate"),  # v1 called this column "execution date"
+    "payment_date": ("paymentdate", "paymentduedate", "paymentdue", "payabledate"),
+}
+
+
+def parse_corporate_actions(html: str) -> list[CorporateAction]:
+    page = extract_tables(html)
+    tables = matching_tables(page, ACTION_COLUMNS, ("symbol", "type", "amount"))
+    if not tables:
+        raise ParseError("corporate-actions", "no table with 'instrument', 'action' and 'dividend amount' columns")
+    warn_missing_columns("corporate-actions", [cols for _, cols in tables])
+    actions: dict[tuple, CorporateAction] = {}
+    skipped: set[tuple[str, ...]] = set()  # a row repeated in the mobile copy counts once
+    for table, cols in tables:
+        for row in data_rows(table):
+            cells = row.cells
+            symbol = cell_text(cells, cols["symbol"]).upper()
+            action_type = normalize_action_type(cell_text(cells, cols["type"]))
+            if not symbol or not action_type:
+                skipped.add(tuple(cell.text for cell in cells))
+                continue
+            currency, amount = parse_amount(cell_text(cells, cols["amount"]))
+            action = CorporateAction(
+                symbol=symbol,
+                type=action_type,
+                amount=amount,
+                currency=currency,
+                record_date=parse_date(cell_text(cells, cols["record_date"])),
+                ex_date=parse_date(cell_text(cells, cols["ex_date"])),
+                payment_date=parse_date(cell_text(cells, cols["payment_date"])),
+                instrument_code=row_instrument_code(row),
+            )
+            actions.setdefault(action.key(), action)
+    if skipped:
+        log.warning("corporate-actions: skipped %d row(s) without an instrument or action type", len(skipped))
+    return list(actions.values())
