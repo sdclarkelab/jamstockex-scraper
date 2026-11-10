@@ -1,0 +1,166 @@
+"""Parsing of JSE website pages.
+
+Columns are located by normalised header text, not position, so an inserted
+or reordered column doesn't break parsing. When the site renames a header,
+add the new normalised name to the relevant alias tuple. Value parsers
+return None for anything they can't parse; they never invent a 0.
+"""
+
+from __future__ import annotations
+
+import datetime as dt
+import logging
+import re
+from decimal import Decimal, InvalidOperation
+from urllib.parse import parse_qs, urlparse
+
+from jamstockex.html import Cell, Row, Table, extract_tables
+from jamstockex.models import Company, CorporateAction, Index, Quote
+
+log = logging.getLogger(__name__)
+
+Columns = dict[str, int | None]
+Aliases = dict[str, tuple[str, ...]]
+
+_EMPTY = {"", "-", "--", "n/a", "na", "nil"}
+_DATE_FORMATS = ("%a %d %b %Y", "%d %b %Y", "%Y-%m-%d", "%A %d %B %Y", "%d %B %Y")
+
+
+class ParseError(Exception):
+    """A page doesn't have the structure we expect (usually a site layout change)."""
+
+    def __init__(self, page: str, problem: str) -> None:
+        super().__init__(f"{page}: {problem}")
+        self.page = page
+        self.problem = problem
+
+
+# --- table helpers -------------------------------------------------------
+
+
+def normalize_header(text: str) -> str:
+    return re.sub(r"[^a-z0-9]", "", text.lower().replace("%", "pct"))
+
+
+def header_index(table: Table) -> dict[str, int]:
+    """Normalised header text -> column position, from the table's first row."""
+    if not table.rows:
+        return {}
+    index: dict[str, int] = {}
+    for position, cell in enumerate(table.rows[0].cells):
+        index.setdefault(normalize_header(cell.text), position)
+    return index
+
+
+def resolve_columns(header: dict[str, int], aliases: Aliases) -> Columns:
+    return {field: next((header[name] for name in names if name in header), None) for field, names in aliases.items()}
+
+
+def matching_tables(tables: list[Table], aliases: Aliases, required: tuple[str, ...]) -> list[tuple[Table, Columns]]:
+    matches = []
+    for table in tables:
+        columns = resolve_columns(header_index(table), aliases)
+        if all(columns[field] is not None for field in required):
+            matches.append((table, columns))
+    return matches
+
+
+def data_rows(table: Table) -> list[Row]:
+    """Rows after the header that have <td> cells and some text (blank spacer rows are dropped)."""
+    return [
+        row for row in table.rows[1:]
+        if any(not cell.header for cell in row.cells) and any(cell.text for cell in row.cells)
+    ]
+
+
+def warn_missing_columns(page: str, column_sets: list[Columns], ignore: tuple[str, ...] = ()) -> None:
+    """Warn once per page about optional fields whose header matched no alias.
+
+    Required fields raise ParseError instead. Without this warning, a renamed optional
+    header would silently turn every value in that column into null.
+    """
+    missing = sorted({f for cols in column_sets for f, idx in cols.items() if idx is None} - set(ignore))
+    if missing:
+        log.warning("%s: column(s) not found, values will be null: %s", page, ", ".join(missing))
+
+
+def cell_text(cells: list[Cell], idx: int | None) -> str:
+    if idx is None or idx >= len(cells):
+        return ""
+    return cells[idx].text
+
+
+def cell_href(cells: list[Cell], idx: int | None) -> str | None:
+    if idx is None or idx >= len(cells) or not cells[idx].hrefs:
+        return None
+    return cells[idx].hrefs[0]
+
+
+def instrument_code_from_href(href: str | None) -> str | None:
+    if not href:
+        return None
+    values = parse_qs(urlparse(href).query).get("instrument")
+    if not values:
+        return None
+    return values[0].strip() or None
+
+
+def row_instrument_code(row: Row) -> str | None:
+    for cell in row.cells:
+        for href in cell.hrefs:
+            code = instrument_code_from_href(href)
+            if code:
+                return code
+    return None
+
+
+# --- value parsers -------------------------------------------------------
+
+
+def to_decimal(text: str | None) -> Decimal | None:
+    if text is None:
+        return None
+    cleaned = text.strip().replace(",", "").replace("$", "").replace("%", "").replace(" ", "")
+    negative = cleaned.startswith("(") and cleaned.endswith(")")
+    if negative:
+        cleaned = cleaned[1:-1]
+    if cleaned.lower() in _EMPTY:
+        return None
+    try:
+        value = Decimal(cleaned)
+    except InvalidOperation:
+        return None
+    if not value.is_finite():
+        return None
+    return -value if negative else value
+
+
+def to_int(text: str | None) -> int | None:
+    value = to_decimal(text)
+    if value is None or value != value.to_integral_value():
+        return None
+    return int(value)
+
+
+def parse_date(text: str | None) -> dt.date | None:
+    cleaned = " ".join((text or "").split())
+    for fmt in _DATE_FORMATS:
+        try:
+            return dt.datetime.strptime(cleaned, fmt).date()
+        except ValueError:
+            continue
+    return None
+
+
+def parse_amount(text: str | None) -> tuple[str | None, Decimal | None]:
+    """'JMD 0.7500' -> ('JMD', Decimal('0.7500')); '0.12' -> (None, Decimal('0.12'))."""
+    parts = (text or "").split()
+    if not parts:
+        return None, None
+    if len(parts) >= 2 and parts[0].isalpha():
+        return parts[0].upper(), to_decimal(parts[-1])
+    return None, to_decimal(parts[-1])
+
+
+def normalize_action_type(text: str | None) -> str:
+    return re.sub(r"[^a-z0-9]+", "_", (text or "").lower()).strip("_")
