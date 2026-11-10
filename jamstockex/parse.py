@@ -217,3 +217,103 @@ def parse_listed_companies(html: str, market_label: str) -> list[Company]:
         log.warning("listed-companies (%s): skipped %d row(s) without an instrument link or symbol",
                     market_label, len(skipped))
     return list(companies.values())
+
+
+# --- trade quotes and indices ---------------------------------------------
+
+QUOTE_COLUMNS: Aliases = {
+    "symbol": ("symbol",),
+    "close": ("closingprice", "closeprice", "lasttradedprice", "lastprice"),
+    "change": ("pricechange", "change", "changes"),
+    "change_pct": ("pctchange", "changepct", "percentchange"),
+    "volume": ("volume", "volumetraded"),
+}
+
+INDEX_COLUMNS: Aliases = {
+    "name": ("index", "indexname"),
+    "value": ("value", "indexvalue", "closingvalue"),
+    "change": ("change", "pointchange", "valuechange"),
+    "change_pct": ("pctchange", "changepct", "percentchange"),
+    "volume": ("volume",),
+}
+
+
+# The site's message for a date with no trade data. Matched on squashed, lower-cased page text.
+NO_DATA_MARKER = "looks like there is no data coming back"
+
+
+def is_no_data_page(html: str) -> bool:
+    return NO_DATA_MARKER in " ".join(html.lower().split())
+
+
+def compute_change_pct(close: Decimal | None, change: Decimal | None) -> Decimal | None:
+    if close is None or change is None:
+        return None
+    previous = close - change
+    if previous == 0:
+        return None
+    return (change / previous * 100).quantize(Decimal("0.01"))
+
+
+def parse_trade_quotes(html: str, trade_date: dt.date) -> tuple[dict[str, Quote], list[Index]]:
+    page = extract_tables(html)
+    quote_tables = matching_tables(page, QUOTE_COLUMNS, ("symbol", "close"))
+    index_tables = [
+        (table, cols)
+        for table, cols in matching_tables(page, INDEX_COLUMNS, ("name", "value"))
+        if "symbol" not in header_index(table)
+    ]
+    # A date with no trading (holiday) gets a page with no tables and the site's "no data" message.
+    # No quotes table without that message means the layout changed, which must fail loudly
+    # rather than look like a holiday.
+    if not quote_tables:
+        if is_no_data_page(html):
+            log.info("trade-quotes: the site reports no data for %s (no trading that day)", trade_date.isoformat())
+            return {}, []
+        raise ParseError("trade-quotes", "no quotes table with 'symbol' and 'closing price' columns")
+    if not index_tables:
+        log.warning("trade-quotes: no indices table (with 'index' and 'value' columns) found")
+    warn_missing_columns("trade-quotes", [cols for _, cols in quote_tables], ignore=("change_pct",))
+    warn_missing_columns("trade-quotes (indices)", [cols for _, cols in index_tables])
+
+    quotes: dict[str, Quote] = {}
+    skipped: set[tuple[str, ...]] = set()  # a row repeated in the mobile copy counts once
+    for table, cols in quote_tables:
+        for row in data_rows(table):
+            cells = row.cells
+            code = row_instrument_code(row)
+            if not code or not cell_text(cells, cols["symbol"]):
+                skipped.add(tuple(cell.text for cell in cells))
+                continue
+            close = to_decimal(cell_text(cells, cols["close"]))
+            change = to_decimal(cell_text(cells, cols["change"]))
+            change_pct = to_decimal(cell_text(cells, cols["change_pct"]))
+            if change_pct is None:
+                change_pct = compute_change_pct(close, change)
+            quotes.setdefault(code, Quote(
+                date=trade_date,
+                close=close,
+                change=change,
+                change_pct=change_pct,
+                volume=to_int(cell_text(cells, cols["volume"])),
+            ))
+
+    if skipped:
+        log.warning("trade-quotes: skipped %d row(s) without an instrument link or symbol", len(skipped))
+
+    indices: dict[str, Index] = {}
+    for table, cols in index_tables:
+        for row in data_rows(table):
+            cells = row.cells
+            name = cell_text(cells, cols["name"])
+            if not name:
+                continue
+            indices.setdefault(name, Index(
+                name=name,
+                date=trade_date,
+                value=to_decimal(cell_text(cells, cols["value"])),
+                change=to_decimal(cell_text(cells, cols["change"])),
+                change_pct=to_decimal(cell_text(cells, cols["change_pct"])),
+                volume=to_int(cell_text(cells, cols["volume"])),
+            ))
+    return quotes, list(indices.values())
