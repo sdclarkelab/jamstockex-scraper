@@ -99,7 +99,7 @@ LICENSE  NOTICE  TERMS.md  README.md  CLAUDE.md
   - `merge(state, scrape_result, config, today) -> State` applies the rules in §6.
   - `write(state, site_dir)` emits the file tree in §5.
   - JSON is minified, UTF-8, with sorted keys for stable diffs.
-  - A file is rewritten only when something other than `meta.generated_at` changed. Unchanged files keep their bytes, so a holiday or quiet day commits only the files that really changed (`status.json` always changes, because it records `fetched_at`).
+  - A file is rewritten only when something other than `meta.generated_at` changed. Unchanged files keep their bytes, so a holiday or quiet day commits only the files that really changed. Three files change on every successful run: `status.json` (it records `fetched_at`), and `corporate-actions.json` and `dividends.json` (their `meta.as_of` is the date of the latest corporate-actions fetch).
 - **`__main__.py`:**
   - Orchestration: load config and state, decide what is due (§3.3), fetch and parse each due dataset independently, merge, write.
   - Logs a summary and appends it to `$GITHUB_STEP_SUMMARY` when that is set.
@@ -348,7 +348,7 @@ pytest, fully offline. TDD: a failing test before each parser and merge rule.
   - no `jamstockex.com` URL in any output;
   - the due-dataset logic (listings refresh by age, unknown code, flag; an unmatched code doesn't re-trigger; a failed market is retried alone);
   - the corporate-actions window catching up after an outage;
-  - a holiday rewrites only the files whose content changed;
+  - a holiday rewrites only the files whose content changed (`status.json`, `corporate-actions.json`, `dividends.json`);
   - parser warnings appear in the run summary;
   - exit codes, including one dataset failing while others publish.
 - **Real-page checks** (`test_parse_real.py`, local only, skipped when the pages are absent): every alias matches on every saved page, no page is paginated, the holiday page parses to zero quotes, and the market codes and labels match `config.toml`.
