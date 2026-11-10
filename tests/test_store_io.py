@@ -161,24 +161,26 @@ def _stale_lock(path):
     path.write_text(json.dumps({"pid": 1, "time": 1_000.0}), encoding="utf-8")
 
 
-def test_stale_takeover_race_has_at_most_one_holder(tmp_path, monkeypatch):
+def test_fresh_lock_created_before_the_retry_is_left_intact(tmp_path, monkeypatch):
     path = tmp_path / "jse-data.lock"
     _stale_lock(path)
-    real_replace = os.replace
-    winner = store.RefreshLock(path, clock=lambda: 1_000.0 + 601)
+    real_unlink = os.unlink
 
-    def racing_replace(src, dst):
-        # The other process takes over first and creates its fresh lock.
-        monkeypatch.setattr(os, "replace", real_replace)
-        winner.acquire()
-        return real_replace(src, dst)
+    def unlink_then_other_process_locks(target, *args, **kwargs):
+        real_unlink(target, *args, **kwargs)
+        monkeypatch.setattr(os, "unlink", real_unlink)
+        path.write_text(json.dumps({"pid": 4242, "time": 1_000.0 + 601}), encoding="utf-8")
 
-    monkeypatch.setattr(os, "replace", racing_replace)
-    loser = store.RefreshLock(path, clock=lambda: 1_000.0 + 601)
+    def no_link(*args, **kwargs):
+        raise AssertionError("os.link must not be used")
+
+    monkeypatch.setattr(os, "unlink", unlink_then_other_process_locks)
+    monkeypatch.setattr(os, "link", no_link)
+    lock = store.RefreshLock(path, clock=lambda: 1_000.0 + 601)
     with pytest.raises(store.LockHeld):
-        loser.acquire()
-    assert winner.held and not loser.held
-    assert json.loads(path.read_text(encoding="utf-8"))["pid"] == os.getpid()
+        lock.acquire()
+    assert not lock.held
+    assert json.loads(path.read_text(encoding="utf-8"))["pid"] == 4242
     assert [p.name for p in tmp_path.iterdir()] == ["jse-data.lock"]
 
 
@@ -186,10 +188,10 @@ def test_takeover_permission_error_is_lock_held(tmp_path, monkeypatch):
     path = tmp_path / "jse-data.lock"
     _stale_lock(path)
 
-    def denied(src, dst):
+    def denied(target, *args, **kwargs):
         raise PermissionError("in use")
 
-    monkeypatch.setattr(os, "replace", denied)
+    monkeypatch.setattr(os, "unlink", denied)
     with pytest.raises(store.LockHeld):
         store.RefreshLock(path, clock=lambda: 1_000.0 + 601).acquire()
 

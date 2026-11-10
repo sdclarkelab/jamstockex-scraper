@@ -17,7 +17,6 @@ import logging
 import os
 import tempfile
 import time
-import uuid
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
@@ -216,34 +215,21 @@ class RefreshLock:
         raise LockHeld(f"{self.path}: another refresh is running")
 
     def _take_over(self) -> None:
-        """Move the stale lock aside atomically: only one process can win the rename."""
-        aside = self.path.with_name(f"{self.path.name}.stale-{os.getpid()}-{uuid.uuid4().hex}")
+        # Accepted residual race: two processes that both judge the same >10-minute-old lock stale
+        # at the same instant can both end up holding it. Fine for a single-user local app.
         try:
-            os.replace(self.path, aside)
-        except FileNotFoundError:
-            return  # someone else took it over first; the retry decides who holds it
-        except OSError as exc:
-            raise LockHeld(f"{self.path}: stale lock can't be removed ({exc})") from exc
-        try:
-            if not self._is_stale(aside):
-                # We renamed a fresh lock that another process created after our check: put it back.
-                with contextlib.suppress(OSError):
-                    os.link(aside, self.path)
-                os.unlink(aside)
-                raise LockHeld(f"{self.path}: another refresh is running")
-            os.unlink(aside)
+            os.unlink(self.path)
         except FileNotFoundError:
             pass
         except OSError as exc:
             raise LockHeld(f"{self.path}: stale lock can't be removed ({exc})") from exc
 
-    def _is_stale(self, path: Path | None = None) -> bool:
-        path = path or self.path
+    def _is_stale(self) -> bool:
         try:
-            started = float(json.loads(path.read_text(encoding="utf-8"))["time"])
+            started = float(json.loads(self.path.read_text(encoding="utf-8"))["time"])
         except (OSError, ValueError, KeyError, TypeError):
             try:
-                started = path.stat().st_mtime
+                started = self.path.stat().st_mtime
             except FileNotFoundError:
                 return True
         return self.clock() - started > self.stale_after_s
