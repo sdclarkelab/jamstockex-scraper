@@ -202,3 +202,71 @@ def test_service_skips_a_check_while_another_refresh_holds_the_lock(tmp_path, ca
     with store.RefreshLock(tmp_path / "jse-data.lock"):
         assert service.check() is None
     assert "Another refresh is running" in capsys.readouterr().err
+
+
+class BlockingFetcher(FakeFetcher):
+    """Blocks the first request until released, so a refresh can be caught in flight."""
+
+    def __init__(self, started, release):
+        super().__init__(pages())
+        self.started, self.release = started, release
+
+    def get(self, path):
+        self.started.set()
+        assert self.release.wait(10)
+        return super().get(path)
+
+
+def test_ctrl_c_during_a_background_refresh_leaves_no_lock_behind(tmp_path, capsys, monkeypatch):
+    started, release = threading.Event(), threading.Event()
+    monkeypatch.setattr(cli, "Fetcher", lambda source: BlockingFetcher(started, release))
+    monkeypatch.setattr(cli, "utcnow", lambda: NOW)
+    monkeypatch.setattr(cli, "SHUTDOWN_JOIN_TIMEOUT_S", 0.1)
+    store.save(store.State(), tmp_path / "jse-data.json", now=NOW)
+    before = (tmp_path / "jse-data.json").read_bytes()
+
+    def interrupt(server):
+        assert started.wait(10)
+        assert (tmp_path / "jse-data.lock").exists()
+        raise KeyboardInterrupt
+
+    try:
+        assert cli.main(["serve", "--data-dir", str(tmp_path), "--port", "0"], on_ready=interrupt) == 0
+        assert not (tmp_path / "jse-data.lock").exists()
+        assert (tmp_path / "jse-data.json").read_bytes() == before
+        assert "refresh was interrupted" in capsys.readouterr().out
+    finally:
+        release.set()
+    for t in threading.enumerate():
+        if t.name == "refresh":
+            t.join(timeout=10)
+    assert (tmp_path / "jse-data.json").read_bytes() == before  # the abandoned refresh saves nothing
+
+
+def test_service_reloads_state_after_taking_the_lock(tmp_path, fake_site, monkeypatch):
+    service = cli.Service(default_config(), tmp_path, store.State())
+    real_acquire = store.RefreshLock.acquire
+
+    done = []
+
+    def acquire_after_concurrent_save(lock):
+        if not done:
+            done.append(1)
+            assert cli.main(["refresh", "--data-dir", str(tmp_path)]) == 0  # another process refreshes first
+        real_acquire(lock)
+
+    monkeypatch.setattr(store.RefreshLock, "acquire", acquire_after_concurrent_save)
+    assert service.check() is None  # the concurrent save made it current: nothing left to fetch
+    assert len(fake_site) == 1      # only the concurrent refresh created a fetcher
+    assert service.state.status["quotes"].as_of == dt.date(2026, 11, 9)
+
+
+def test_refresh_save_failure_exits_2_naming_the_data_file(tmp_path, capsys, fake_site, monkeypatch):
+    def boom(*args, **kwargs):
+        raise PermissionError("disk full")
+
+    monkeypatch.setattr(store, "save", boom)
+    assert cli.main(["refresh", "--data-dir", str(tmp_path)]) == 2
+    err = capsys.readouterr().err
+    assert str(tmp_path / "jse-data.json") in err and len(err.strip().splitlines()) == 1
+    assert not (tmp_path / "jse-data.lock").exists()

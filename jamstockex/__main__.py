@@ -25,6 +25,8 @@ from jamstockex.server import LocalServer, Snapshot, make_server
 
 log = logging.getLogger("jamstockex")
 
+SHUTDOWN_JOIN_TIMEOUT_S = 5.0
+
 
 def utcnow() -> dt.datetime:
     return dt.datetime.now(dt.timezone.utc)
@@ -98,6 +100,9 @@ def cmd_refresh(config: Config, data_dir: Path, *, force_listings: bool) -> int:
     except store.StoreError as exc:
         print(f"Data file error: {exc}", file=sys.stderr)
         return 2
+    except OSError as exc:
+        print(f"Can't save the data file {data_file}: {exc}", file=sys.stderr)
+        return 2
     print(report.text())
     return report.exit_code
 
@@ -111,6 +116,8 @@ class Service:
         self.lock_file = data_dir / store.LOCK_FILE
         self.state = state
         self.refreshing = False
+        self.lock: store.RefreshLock | None = None  # held only while a refresh is in flight
+        self.interrupted = False
         self.next_check_at: dt.datetime | None = None
         self._snapshot = Snapshot.from_state(state, data_file=str(self.data_file))
 
@@ -138,15 +145,25 @@ class Service:
         except store.LockHeld:
             print("Another refresh is running; skipping this check.", file=sys.stderr)
             return None
+        self.lock = lock
         try:
+            try:
+                self.state = store.load(self.data_file)  # a concurrent `refresh` may have saved since the first load
+            except store.StoreError as exc:
+                print(f"Data file error: {exc}", file=sys.stderr)
+                return None
+            self._publish()
+            if not due(self.state, now, self.config).automatic_allowed(now):
+                return None
             self.refreshing = True
             self._publish()
             report = run_refresh(self.state, Fetcher(self.config.source), now, self.config)
-            if report.attempted:
+            if report.attempted and not self.interrupted:
                 store.save(self.state, self.data_file, now=utcnow())
         finally:
             self.refreshing = False
             lock.release()
+            self.lock = None
             self._publish()
         if report.blocked:
             print(BLOCKED_MESSAGE, flush=True)
@@ -157,6 +174,15 @@ class Service:
             print(f"Refreshed: data as of {report.trade_date.isoformat()} "
                   f"({report.requests} request(s) to the JSE site).", flush=True)
         return report
+
+    def abandon_refresh(self) -> bool:
+        """Called at shutdown when the worker is stuck mid-refresh: free the lock, return True if one was held."""
+        lock = self.lock
+        if lock is None or not lock.held:
+            return False
+        self.interrupted = True
+        lock.release()
+        return True
 
     def run(self, stop: threading.Event) -> None:
         interval = self.config.refresh.check_every_minutes * 60
@@ -198,16 +224,18 @@ def cmd_serve(config: Config, data_dir: Path, *, port: int, offline: bool,
     if not offline:
         worker = threading.Thread(target=service.run, args=(stop,), name="refresh", daemon=True)
         worker.start()
-    if on_ready is not None:
-        on_ready(server)
     try:
+        if on_ready is not None:
+            on_ready(server)
         server.serve_forever(poll_interval=0.2)
     except KeyboardInterrupt:
         print("Stopping.")
     finally:
         stop.set()
         if worker is not None:
-            worker.join(timeout=5)
+            worker.join(timeout=SHUTDOWN_JOIN_TIMEOUT_S)
+            if worker.is_alive() and service.abandon_refresh():
+                print("A refresh was interrupted; nothing was saved.", flush=True)
         server.server_close()
     return 0
 
