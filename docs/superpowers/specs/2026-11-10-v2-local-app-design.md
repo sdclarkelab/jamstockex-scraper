@@ -1,7 +1,8 @@
 # v2: Local-First JSE Data App: Design
 
 - **Date:** 2026-11-10
-- **Status:** Approved in brainstorming, pending spec review
+- **Status:** Approved in brainstorming
+- **Revised:** 2026-11-10: import feature removed at the user's request (scrape only)
 - **Supersedes:** `2026-11-09-v2-static-api-design.md` (static public API on GitHub Pages). That design was halted on 2026-11-10, when its gate failed: GitHub Actions got CloudFront `403 Request blocked` on its first request to jamstockex.com.
 - **Release:** `v2.0.0` (the existing `v1.0` tag is untouched)
 
@@ -13,7 +14,7 @@ Replace the MongoDB-backed scraper with a **single-user, local-first app**. It k
 - **need no setup:** a downloaded executable for Windows, macOS or Linux runs as is, and a `.pyz` runs with an existing Python 3.11+;
 - **cost nothing:** free GitHub Actions builds, unsigned binaries;
 - **keep requests to jamstockex.com minimal:** typically 2 per trading day, only when the stored data is out of date;
-- **keep working when automated requests are blocked,** by importing pages the user saved from their browser;
+- **fail safely when automated requests are blocked:** keep serving stored data, tell the user plainly, and never work around the block;
 - **adopt and improve on the parsing in** `sdclarkelab/jamstock-portfolio-tracker` `backend/app/scraper/jse_scraper.py`: header-matched columns, real types, failed versus empty;
 - **relicense the code (v2 onward) under PolyForm Noncommercial 1.0.0,** and state clearly that the data belongs to the JSE Group.
 
@@ -34,7 +35,7 @@ From the JSE Terms & Conditions (text supplied by the user on 2026-11-09) and th
 |---|---|
 | §11 Intellectual property: the JSE Group claims "any other data or information contained on the Site" | The data is not ours. Every API response carries a JSE ownership notice, and the app is for the user's personal, noncommercial use. It is never republished by this project. |
 | §8.2 Acceptable use: no circumventing, impairing or overloading systems | **One honest User-Agent, no rotation and no browser imitation. Never work around a block.** Requests are minimal and spaced out. |
-| §8.3 The JSE may monitor and terminate access | A block is expected and handled: stored data is kept, the user is told, and import is offered (§6). |
+| §8.3 The JSE may monitor and terminate access | A block is handled: stored data is kept and served, the user is told, and automatic refresh waits for the next market close (§6). |
 | §8.5.3 No linking to the Site without prior written consent | **No links to jamstockex.com in API output or docs.** The source is named in plain text. |
 | §6 No recommendation or advice | Every response and the README say: not financial advice. |
 | §11 Trademarks | No JSE logos. The name is used descriptively only, with no implied endorsement. |
@@ -44,7 +45,7 @@ From the JSE Terms & Conditions (text supplied by the user on 2026-11-09) and th
 - **Documentation:** NOTICE and the README state that the app is intended for local personal use and not for hosting.
 - **Limits:** the code is source-available, so this deters but cannot technically stop someone who edits the source. PolyForm Noncommercial already prohibits commercial use.
 
-**Expected block:** automated requests from the development machine were already blocked on 2026-11-09 and 2026-11-10. The honest User-Agent may well be blocked from the user's own connection too. Import (§6.3) is therefore a first-class path, not a fallback afterthought.
+**Known risk: blocking.** Automated requests from the development machine were already blocked on 2026-11-09 and 2026-11-10. The honest User-Agent may be blocked from the user's own connection too. The app then has no way to get data, by design: it serves whatever is stored (nothing, on a first run) and reports `blocked`. The user decided on 2026-11-10 not to add any other way in, such as importing browser-saved pages.
 
 ## 3. Architecture
 
@@ -52,7 +53,7 @@ From the JSE Terms & Conditions (text supplied by the user on 2026-11-09) and th
                       ┌──────────────── jamstockex (one process) ────────────────┐
 JSE website ◄─ fetch ─┤ refresh (background, ≤ once per trading day)              │
                       │      │ parse → merge → atomic save                         │
-saved pages ─ import ─┤      ▼                                                     │
+                      │      ▼                                                     │
                       │ jse-data.json ──load──► in-memory snapshot ──► HTTP server │──► 127.0.0.1:8765
                       └────────────────────────────────────────────────────────────┘     /v2/…  /docs
 ```
@@ -69,7 +70,7 @@ jamstockex/
   parse.py         # header-matched page parsers + value parsers; ParseError
   models.py        # dataclasses: Company, Quote, Index, CorporateAction (+ JSON)
   store.py         # State, load / merge / atomic save of jse-data.json, lock file
-  refresh.py       # due logic, refresh run, import run, Report
+  refresh.py       # due logic, refresh run, Report
   server.py        # http.server routes, Host check, envelope, filters, docs
   openapi.json     # hand-written OpenAPI 3.1 description
   static/swagger/  # vendored swagger-ui-dist files + their Apache-2.0 LICENSE
@@ -109,7 +110,6 @@ LICENSE  NOTICE  README.md  CLAUDE.md
   - **Warnings and skipped rows:** an unmatched optional column logs one warning per page. Skipped rows are counted once per page. Rows missing `instrument_code` or `symbol` (listings, quotes), or `symbol` or `type` (actions), are skipped.
   - **Original case kept.** Value parsers return `None` for anything unparseable, never 0.
   - **Page parsers:** `parse_listed_companies(html, market_label) -> list[Company]`, `parse_trade_quotes(html, trade_date) -> (dict[str, Quote], list[Index])`, `parse_corporate_actions(html) -> list[CorporateAction]`.
-  - **Import helpers:** `detect_page(html) -> "listings" | "quotes" | "corporate_actions" | None`, `detect_market(html, markets) -> int | None`, `detect_trade_date(html) -> date | None`.
 - **`models.py`:** plain dataclasses with `Decimal`/`date` fields, and `to_json`/`from_json`.
 - **`store.py`:**
   - `load(path) -> State` returns an empty state if the file is missing. If the file is corrupt, it raises `StoreError` and never overwrites the file.
@@ -119,7 +119,6 @@ LICENSE  NOTICE  README.md  CLAUDE.md
 - **`refresh.py`:**
   - `latest_close(now)` and `due(state, now, settings) -> Due` (§6.1).
   - `run_refresh(state, fetcher, now, settings, force_listings=False) -> Report` does what is due: fetch, parse, merge.
-  - `run_import(state, folder, now, settings) -> Report`.
   - `Report` holds the requests made, per-dataset outcome (updated, stale or skipped), counts, warnings and errors.
 - **`server.py`:**
   - `make_server(port, snapshot_provider)` returns a `ThreadingHTTPServer` bound to `127.0.0.1`.
@@ -133,7 +132,6 @@ LICENSE  NOTICE  README.md  CLAUDE.md
 |---|---|
 | `jamstockex` (or `jamstockex serve`) | Loads data, starts the API at `http://127.0.0.1:8765`, refreshes in the background when due, and runs until Ctrl+C |
 | `jamstockex refresh [--listings]` | Runs one refresh of what's due now (`--listings` forces all markets) and prints the report. Exit 0 = ok, 1 = a dataset failed or was blocked |
-| `jamstockex import <folder>` | Imports saved pages (§6.3) and prints the report. Exit 0 = ok, 1 = no usable page found |
 | `jamstockex --version` | Prints the version |
 
 **Common options:**
@@ -208,7 +206,7 @@ Everything is GET only, and the base is `http://127.0.0.1:<port>`.
 | `/` | `302` → `/docs` |
 | `/docs` | Swagger UI page; assets at `/docs/assets/<file>` |
 | `/openapi.json` | The OpenAPI 3.1 document |
-| `/v2/status` | Per dataset (`listings`, `quotes`, `indices`, `corporate_actions`): `{as_of, fetched_at, stale, last_error, source}`, where `source` is `"fetch"` or `"import"`. `listings` also has `markets` (the same fields per market label) and `unmatched_codes`. Top level: `refreshing`, `blocked`, `next_check_at`, `data_file` |
+| `/v2/status` | Per dataset (`listings`, `quotes`, `indices`, `corporate_actions`): `{as_of, fetched_at, stale, last_error}`. `listings` also has `markets` (the same fields per market label) and `unmatched_codes`. Top level: `refreshing`, `blocked`, `next_check_at`, `data_file` |
 | `/v2/stocks` | Array of stock entries with `quote`. Filters: `symbol`, `market`, `listed` (`true`/`false`) |
 | `/v2/stocks/{instrument_code}` | One stock entry plus `dividends` and `corporate_actions`; 404 if unknown |
 | `/v2/indices` | Array of `{name, date, value, change, change_pct, volume}` |
@@ -269,7 +267,7 @@ Filters are exact, case-insensitive matches. An unknown filter name or an invali
 - **Packaging:** files are read with `importlib.resources`, so they work from the source tree, the `.pyz` and the PyInstaller build.
 - **`openapi.json`:** written by hand. Every route, filter, response envelope and error is described, with examples.
 
-## 6. Refresh, block handling and import
+## 6. Refresh and block handling
 
 ### 6.1 When a refresh is due
 
@@ -286,7 +284,7 @@ Filters are exact, case-insensitive matches. An unknown filter name or an invali
   - **Transient failure:** after a failed refresh, the next attempt waits at least `retry_after_failure_minutes`.
   - **Block:** after one, there is no automatic attempt until the next `latest_close` advances.
   - **`--offline`:** disables all of this.
-- **Locking:** every refresh and import holds `RefreshLock`. If it is held, `serve` skips that check, while `refresh`/`import` exit 1 with "another refresh is running".
+- **Locking:** every refresh holds `RefreshLock`. If it is held, `serve` skips that check, while `refresh` exits 1 with "another refresh is running".
 
 ### 6.2 Merge rules and failure classes
 
@@ -303,20 +301,10 @@ Reports count companies added, updated and delisted, and actions added.
 
 ### 6.3 Blocked: what the user sees
 
-- **Console (serve):** "The JSE site is blocking automated requests from this computer. Your stored data is still served. To update it, save the pages from your browser (see README) and run: jamstockex import <folder>".
+- **Console (serve):** "The JSE site is blocking automated requests from this computer. Your stored data is still served; automatic refresh will try again after the next market close."
+- **`jamstockex refresh`:** prints the same message and exits 1.
 - **`/v2/status`:** `blocked: true`, and each affected dataset gets `stale: true` with its `last_error`.
 - **Never** a retry with different headers or identity.
-
-### 6.4 Import
-
-`jamstockex import <folder>` reads every `*.htm`/`*.html` in the folder, non-recursively:
-
-1. **Page type:** `detect_page` identifies each page from its table headers. Unrecognized files are listed and skipped.
-2. **Listings:** the market comes from `detect_market`, using the page's selected market option or heading text matched against the configured labels. If that fails, the filename pattern `listed-companies-<code>.html` is used. If neither works, the file is skipped with: "Can't tell which market this is; rename it listed-companies-<code>.html".
-3. **Quotes:** the trade date comes from `detect_trade_date` (the page's date field or heading). If that fails, it uses `latest_close(now)`'s date and warns.
-4. **Merge:** pages are merged in the order listings → quotes → corporate actions, using the same merge as a fetch. Statuses record `source: "import"`. Import never contacts the JSE.
-
-Exactly which markup `detect_market` and `detect_trade_date` read is confirmed against the user's real saved pages (§9, step 1).
 
 ## 7. Distribution and workflows
 
@@ -362,7 +350,6 @@ Exactly which markup `detect_market` and `detect_trade_date` read is confirmed a
   - download and first run per OS;
   - using the API and `/docs`;
   - automatic refresh and what "blocked" means;
-  - how to save pages and run `import`;
   - configuration;
   - development (pytest);
   - **License and data** (LICENSE, NOTICE, personal use, not advice).
@@ -377,10 +364,10 @@ Exactly which markup `detect_market` and `detect_trade_date` read is confirmed a
    - combined trade quotes for a trading day and for a public holiday;
    - corporate actions with a `thruDate` a year ahead.
 
-   This confirms the header names, the `instrument_code` format, the absence of pagination, holiday behaviour, and the markup for `detect_market`/`detect_trade_date`. Pagination, or a holiday answered with the previous session's data, is a stop-and-redesign point.
-2. TDD in this order: `config`, `models`, `fetch`, `html`, `parse`, `store`, `refresh` (with import), `server` with `openapi.json` and the docs, then `__main__`.
+   The pages are used only to verify the parsers. They confirm the header names, the `instrument_code` format, the absence of pagination, and holiday behaviour. Pagination, or a holiday answered with the previous session's data, is a stop-and-redesign point.
+2. TDD in this order: `config`, `models`, `fetch`, `html`, `parse`, `store`, `refresh`, `server` with `openapi.json` and the docs, then `__main__`.
 3. `ci.yml`, `release.yml`, legal files, README, CLAUDE.md; remove the v1 files.
-4. **Live check by the user:** `jamstockex refresh` from their own computer. Either result is acceptable: success, or a clear blocked message followed by a successful `import`.
+4. **Live check by the user:** `jamstockex refresh` from their own computer. Success is the goal. A clear blocked message, with no crash and stored data still served, is the acceptable failure mode, and it is reported to the user.
 5. PR to `main`, tag `v2.0.0`, and the release builds and publishes.
 
 **Testing:** pytest, offline. Tests may open sockets on 127.0.0.1 only.
@@ -406,12 +393,6 @@ Exactly which markup `detect_market` and `detect_trade_date` read is confirmed a
   - no retry after a block until the next close;
   - per-market listings and `unmatched_codes`;
   - the corporate-actions catch-up window.
-- **Import** (synthetic saved pages):
-  - type detection;
-  - market detection from markup and from the filename, and the rename message;
-  - trade-date detection and its fallback warning;
-  - `source: "import"`;
-  - no fetcher calls.
 - **`server.py`** (a real server on a random 127.0.0.1 port):
   - every route, filter and sort;
   - 400, 404, 405 and 500 shapes;
@@ -427,10 +408,10 @@ Exactly which markup `detect_market` and `detect_trade_date` read is confirmed a
   - `--offline` makes no fetcher calls;
   - `--version`.
 - **Standard library only:** an `ast` scan of `jamstockex/` imports against `sys.stdlib_module_names`.
-- **Real-page checks** (`tests/test_parse_real.py`, local only, skipped when the pages are absent): every alias matches, holiday → zero quotes, detection helpers work on every saved page, market labels match the config.
+- **Real-page checks** (`tests/test_parse_real.py`, local only, skipped when the pages are absent): every alias matches, holiday → zero quotes, market labels match the config.
 
 **Risks:**
-- **Automated refresh blocked from the user's connection.** Likely, given the 2026-11-09/10 results. Handled by §6.3–§6.4, with no circumvention.
+- **Automated refresh blocked from the user's connection.** Likely, given the 2026-11-09/10 results. The app then reports `blocked` and serves only stored data, with no circumvention and no import (§2, §6.3).
 - **JSE layout changes.** These surface as a `ParseError` naming the page and header; the fix is usually an alias in `parse.py`.
 - **Unsigned binaries.** One-time OS approval, documented in the README.
 - **Intel macOS runner availability** on GitHub Actions. If no Intel runner is offered, publish only the arm64 build and point Intel Mac users to the `.pyz`.
