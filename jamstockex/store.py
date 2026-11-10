@@ -246,3 +246,221 @@ class RefreshLock:
 
     def __exit__(self, *exc: object) -> None:
         self.release()
+
+
+# --- merge ----------------------------------------------------------------
+
+
+NO_DATA_STALE_DAYS = 3  # trading days in a row without quotes before quotes and indices are marked stale
+
+
+@dataclass
+class ScrapeResult:
+    """What one refresh fetched. A field left as None (and absent from errors) was not attempted."""
+
+    trade_date: dt.date
+    listings: dict[str, list[Company]] | None = None  # market label -> companies, for pages that loaded
+    listing_errors: dict[str, str] = field(default_factory=dict)  # market label -> error
+    listings_full: bool = False  # every configured market was requested this run
+    quotes: dict[str, Quote] | None = None
+    indices: list[Index] | None = None
+    actions: list[CorporateAction] | None = None
+    errors: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass
+class MergeStats:
+    """What a merge changed, for the run summary."""
+
+    companies_added: int = 0
+    companies_updated: int = 0
+    companies_delisted: int = 0
+    actions_added: int = 0
+
+
+def merge(
+    state: State,
+    result: ScrapeResult,
+    *,
+    today: dt.date,
+    now: dt.datetime,
+    settings: Config,
+    stats: MergeStats | None = None,
+) -> list[str]:
+    """Fold a scrape into `state`. Returns warnings; fills `stats` (if given) with change counts."""
+    warnings: list[str] = []
+    errors = result.errors
+    if stats is None:
+        stats = MergeStats()
+
+    if result.listings is not None or result.listing_errors:
+        warnings += _merge_listings(state, result.listings or {}, result.listing_errors, today=today, now=now,
+                                    max_drop_pct=settings.refresh.max_listing_drop_pct, stats=stats)
+        if result.listings_full and result.quotes is not None:
+            # Whatever a full refresh couldn't explain won't trigger another refresh tomorrow. Codes
+            # already recorded stay until a listings refresh finds them (a holiday has no quotes).
+            state.unmatched = (state.unmatched | set(result.quotes)) - set(state.companies)
+
+    if result.quotes is not None or "quotes" in errors:
+        if result.quotes is not None:
+            warnings += _merge_quotes(state, result.quotes)
+        _mark(state.status["quotes"], errors.get("quotes"), now, as_of=result.trade_date if result.quotes else None)
+
+    if result.indices is not None or "indices" in errors:
+        if result.indices:
+            state.indices = list(result.indices)
+        _mark(state.status["indices"], errors.get("indices"), now,
+              as_of=result.trade_date if result.indices else None)
+
+    if result.quotes is not None and "quotes" not in errors:
+        warning = _count_no_data_days(state, quotes_found=bool(result.quotes))
+        if warning:
+            warnings.append(warning)
+
+    if result.actions is not None or "corporate_actions" in errors:
+        if result.actions is not None:
+            stats.actions_added += _merge_actions(state, result.actions)
+        _mark(state.status["corporate_actions"], errors.get("corporate_actions"), now, as_of=result.trade_date)
+
+    state.unmatched -= set(state.companies)
+    _assign_instrument_codes(state)
+    for warning in warnings:
+        log.warning(warning)
+    return warnings
+
+
+def _mark(status: DatasetStatus, error: str | None, now: dt.datetime, *, as_of: dt.date | None) -> None:
+    if error:
+        status.stale = True
+        status.last_error = error
+        return
+    status.stale = False
+    status.last_error = None
+    status.fetched_at = now
+    if as_of is not None:
+        status.as_of = as_of
+
+
+def _count_no_data_days(state: State, *, quotes_found: bool) -> str | None:
+    """Safety net for the holiday rule: a "no data" page every trading day may be a site change.
+
+    Counts successful quotes refreshes in a row that returned no quotes; any quote resets it.
+    At NO_DATA_STALE_DAYS, quotes and indices are marked stale. That is not a failure: there is
+    no failure wait, and the next close is fetched as usual.
+    """
+    status = state.status["quotes"]
+    status.no_data_days = 0 if quotes_found else status.no_data_days + 1
+    if status.no_data_days < NO_DATA_STALE_DAYS:
+        return None
+    message = (f"No trade data for {status.no_data_days} trading days in a row; "
+               "the site may have changed")
+    for name in ("quotes", "indices"):
+        state.status[name].stale = True
+        state.status[name].last_error = message
+    return message
+
+
+def _merge_listings(state: State, pages: dict[str, list[Company]], failed: dict[str, str], *,
+                    today: dt.date, now: dt.datetime, max_drop_pct: int, stats: MergeStats) -> list[str]:
+    warnings: list[str] = []
+    seen = {c.instrument_code for companies in pages.values() for c in companies}
+    listed_before = {
+        label: {code for code, c in state.companies.items() if c.listed and c.market == label} for label in pages
+    }
+    for companies in pages.values():
+        for new in companies:
+            old = state.companies.get(new.instrument_code)
+            if old is None:
+                new.listed, new.listed_since, new.delisted_on = True, today, None
+                state.companies[new.instrument_code] = new
+                stats.companies_added += 1
+                continue
+            before = (old.symbol, old.name, old.market, old.currency, old.sector, old.type, old.website,
+                      old.listed, old.delisted_on)
+            old.symbol, old.name, old.market = new.symbol, new.name, new.market
+            old.currency, old.sector, old.type, old.website = new.currency, new.sector, new.type, new.website
+            old.listed, old.delisted_on = True, None
+            after = (old.symbol, old.name, old.market, old.currency, old.sector, old.type, old.website,
+                     old.listed, old.delisted_on)
+            if after != before:
+                stats.companies_updated += 1
+
+    # Delist per market, and only for markets whose page loaded. Each market has its own guard,
+    # so an empty or truncated page for a small market can't delist it wholesale.
+    for label in sorted(pages):
+        previous = listed_before[label]
+        missing = previous - seen
+        if missing:
+            found = len({c.instrument_code for c in pages[label]})
+            if found == 0 or found * 100 < (100 - max_drop_pct) * len(previous):  # integer-safe
+                warnings.append(
+                    f"Delisting held for {label}: {found} instrument(s) on the page vs {len(previous)} "
+                    f"previously listed (max drop {max_drop_pct}%)"
+                )
+            else:
+                for code in sorted(missing):
+                    state.companies[code].listed = False
+                    state.companies[code].delisted_on = today
+                stats.companies_delisted += len(missing)
+                log.info("Delisted %d %s instrument(s): %s", len(missing), label, ", ".join(sorted(missing)))
+        _mark(state.markets.setdefault(label, DatasetStatus()), None, now, as_of=today)
+
+    for label, error in failed.items():
+        _mark(state.markets.setdefault(label, DatasetStatus()), error, now, as_of=None)
+
+    # The listings dataset summarises its markets. as_of is the oldest successful refresh.
+    summary = state.status["listings"]
+    stale = sorted(label for label, m in state.markets.items() if m.stale)
+    summary.stale = bool(stale)
+    summary.last_error = "; ".join(f"{label}: {state.markets[label].last_error}" for label in stale) or None
+    if pages:
+        summary.fetched_at = now
+    dates = [m.as_of for m in state.markets.values() if m.as_of]
+    summary.as_of = min(dates) if dates else None
+    return warnings
+
+
+def _merge_quotes(state: State, quotes: dict[str, Quote]) -> list[str]:
+    unknown = []
+    for code, new_quote in quotes.items():
+        company = state.companies.get(code)
+        if company is None:
+            unknown.append(code)
+            continue
+        company.quote = new_quote
+    if unknown:
+        return [f"Quotes skipped for {len(unknown)} unknown instrument(s): {', '.join(sorted(unknown))}"]
+    return []
+
+
+def _merge_actions(state: State, actions: list[CorporateAction]) -> int:
+    """Union with the stored actions. Returns how many were new."""
+    existing = {a.key() for a in state.actions}
+    added = 0
+    for new in actions:
+        if new.key() not in existing:
+            state.actions.append(new)
+            existing.add(new.key())
+            added += 1
+    return added
+
+
+def _assign_instrument_codes(state: State) -> None:
+    by_symbol: dict[str, list[Company]] = {}
+    for company in state.companies.values():
+        by_symbol.setdefault(company.symbol.upper(), []).append(company)
+    state.actions = [
+        a if a.instrument_code else replace(a, instrument_code=_match_code(a, by_symbol))
+        for a in state.actions
+    ]
+
+
+def _match_code(action: CorporateAction, by_symbol: dict[str, list[Company]]) -> str | None:
+    candidates = by_symbol.get(action.symbol.upper(), [])
+    if len(candidates) == 1:
+        return candidates[0].instrument_code
+    if action.currency:
+        same_currency = [c for c in candidates if (c.currency or "").upper() == action.currency.upper()]
+        if len(same_currency) == 1:
+            return same_currency[0].instrument_code
+    return None
