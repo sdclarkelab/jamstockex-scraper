@@ -17,6 +17,7 @@ import logging
 import os
 import tempfile
 import time
+import uuid
 from dataclasses import dataclass, field, replace
 from decimal import Decimal
 from pathlib import Path
@@ -157,7 +158,7 @@ def load(path: str | Path) -> State:
         raise StoreError(f"{path}: can't read the data file ({type(exc).__name__}: {exc}); it was left untouched") from exc
     try:
         return state_from_json(json.loads(text, parse_float=Decimal))
-    except (ValueError, KeyError, TypeError, AttributeError) as exc:
+    except (ValueError, KeyError, TypeError, AttributeError, ArithmeticError, RecursionError) as exc:
         raise StoreError(f"{path}: not a valid jamstockex data file ({type(exc).__name__}: {exc}); "
                          "it was left untouched") from exc
 
@@ -201,21 +202,48 @@ class RefreshLock:
                 if not self._is_stale():
                     raise LockHeld(f"{self.path}: another refresh is running") from None
                 log.warning("Taking over a stale lock: %s", self.path)
-                with contextlib.suppress(FileNotFoundError):
-                    os.unlink(self.path)
+                self._take_over()
                 continue
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                json.dump({"pid": os.getpid(), "time": self.clock()}, handle)
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    json.dump({"pid": os.getpid(), "time": self.clock()}, handle)
+            except BaseException:
+                with contextlib.suppress(OSError):
+                    os.unlink(self.path)
+                raise
             self.held = True
             return
         raise LockHeld(f"{self.path}: another refresh is running")
 
-    def _is_stale(self) -> bool:
+    def _take_over(self) -> None:
+        """Move the stale lock aside atomically: only one process can win the rename."""
+        aside = self.path.with_name(f"{self.path.name}.stale-{os.getpid()}-{uuid.uuid4().hex}")
         try:
-            started = float(json.loads(self.path.read_text(encoding="utf-8"))["time"])
+            os.replace(self.path, aside)
+        except FileNotFoundError:
+            return  # someone else took it over first; the retry decides who holds it
+        except OSError as exc:
+            raise LockHeld(f"{self.path}: stale lock can't be removed ({exc})") from exc
+        try:
+            if not self._is_stale(aside):
+                # We renamed a fresh lock that another process created after our check: put it back.
+                with contextlib.suppress(OSError):
+                    os.link(aside, self.path)
+                os.unlink(aside)
+                raise LockHeld(f"{self.path}: another refresh is running")
+            os.unlink(aside)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            raise LockHeld(f"{self.path}: stale lock can't be removed ({exc})") from exc
+
+    def _is_stale(self, path: Path | None = None) -> bool:
+        path = path or self.path
+        try:
+            started = float(json.loads(path.read_text(encoding="utf-8"))["time"])
         except (OSError, ValueError, KeyError, TypeError):
             try:
-                started = self.path.stat().st_mtime
+                started = path.stat().st_mtime
             except FileNotFoundError:
                 return True
         return self.clock() - started > self.stale_after_s

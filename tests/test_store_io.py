@@ -136,3 +136,73 @@ def test_unreadable_lock_falls_back_to_its_modification_time(tmp_path):
         store.RefreshLock(path, clock=lambda: 5_000.0 + 60).acquire()
     with store.RefreshLock(path, clock=lambda: 5_000.0 + 601):
         assert path.exists()
+
+
+def test_non_numeric_decimal_raises_store_error_and_is_untouched(tmp_path):
+    path = tmp_path / "jse-data.json"
+    store.save(sample_state(), path, now=NOW)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["indices"][0]["value"] = "abc"
+    text = json.dumps(data)
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(store.StoreError, match="left untouched"):
+        store.load(path)
+    assert path.read_text(encoding="utf-8") == text
+
+
+def test_deeply_nested_json_raises_store_error(tmp_path):
+    path = tmp_path / "jse-data.json"
+    path.write_text("[" * 100_000, encoding="utf-8")
+    with pytest.raises(store.StoreError):
+        store.load(path)
+
+
+def _stale_lock(path):
+    path.write_text(json.dumps({"pid": 1, "time": 1_000.0}), encoding="utf-8")
+
+
+def test_stale_takeover_race_has_at_most_one_holder(tmp_path, monkeypatch):
+    path = tmp_path / "jse-data.lock"
+    _stale_lock(path)
+    real_replace = os.replace
+    winner = store.RefreshLock(path, clock=lambda: 1_000.0 + 601)
+
+    def racing_replace(src, dst):
+        # The other process takes over first and creates its fresh lock.
+        monkeypatch.setattr(os, "replace", real_replace)
+        winner.acquire()
+        return real_replace(src, dst)
+
+    monkeypatch.setattr(os, "replace", racing_replace)
+    loser = store.RefreshLock(path, clock=lambda: 1_000.0 + 601)
+    with pytest.raises(store.LockHeld):
+        loser.acquire()
+    assert winner.held and not loser.held
+    assert json.loads(path.read_text(encoding="utf-8"))["pid"] == os.getpid()
+    assert [p.name for p in tmp_path.iterdir()] == ["jse-data.lock"]
+
+
+def test_takeover_permission_error_is_lock_held(tmp_path, monkeypatch):
+    path = tmp_path / "jse-data.lock"
+    _stale_lock(path)
+
+    def denied(src, dst):
+        raise PermissionError("in use")
+
+    monkeypatch.setattr(os, "replace", denied)
+    with pytest.raises(store.LockHeld):
+        store.RefreshLock(path, clock=lambda: 1_000.0 + 601).acquire()
+
+
+def test_failed_lock_write_removes_the_lock_file(tmp_path, monkeypatch):
+    path = tmp_path / "jse-data.lock"
+
+    def boom(*args, **kwargs):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(store.json, "dump", boom)
+    lock = store.RefreshLock(path)
+    with pytest.raises(OSError, match="disk full"):
+        lock.acquire()
+    assert not path.exists()
+    assert not lock.held
