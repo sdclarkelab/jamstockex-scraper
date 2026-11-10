@@ -203,3 +203,6 @@ secrets.json
 # End of https://www.gitignore.io/api/python,pycharm
 # Real JSE pages saved by hand for local parser checks. Never commit them.
 tests/fixtures/real/
+
+# Local virtual environment
+.venv/
