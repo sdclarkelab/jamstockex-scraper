@@ -1,7 +1,7 @@
 # v2: Static JSON API for JSE Market Data — Design
 
 - **Date:** 2026-11-09
-- **Status:** Approved in brainstorming, pending spec review
+- **Status:** **Superseded** on 2026-11-10 by `2026-11-10-v2-local-app-design.md`. Halted at its gate: GitHub Actions got CloudFront 403 from jamstockex.com.
 - **Revised:** 2026-11-09 after review: quotes-table ParseError, unmatched codes, per-market listings status and delisting guard, optional-column warnings, corporate-actions catch-up, unchanged files not rewritten, broader real-page checks
 - **Release:** `v2.0.0` (the existing `v1.0` tag is untouched)
 

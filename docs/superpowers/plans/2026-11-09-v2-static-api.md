@@ -1,5 +1,7 @@
 # v2 Static JSON API Implementation Plan
 
+> **SUPERSEDED (2026-11-10).** Do not execute. Task 1's gate failed (CloudFront 403 from GitHub Actions). Replaced by the local-first app design `docs/superpowers/specs/2026-11-10-v2-local-app-design.md` and its plan.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Replace the MongoDB scraper with a minimal, configurable Python 3.12 package. Once per trading day, from GitHub Actions, it scrapes jamstockex.com and publishes a free static JSON API (`/v2/`) on GitHub Pages. It also relicenses the code under PolyForm Noncommercial 1.0.0.
