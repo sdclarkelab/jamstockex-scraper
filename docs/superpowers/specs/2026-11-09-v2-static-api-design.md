@@ -2,6 +2,7 @@
 
 - **Date:** 2026-11-09
 - **Status:** Approved in brainstorming, pending spec review
+- **Revised:** 2026-11-09 after review: quotes-table ParseError, unmatched codes, per-market listings status and delisting guard, optional-column warnings, corporate-actions catch-up, unchanged files not rewritten, broader real-page checks
 - **Release:** `v2.0.0` (the existing `v1.0` tag is untouched)
 
 ## 1. Goal
@@ -89,6 +90,8 @@ LICENSE  NOTICE  TERMS.md  README.md  CLAUDE.md
   - **Value parsers:** `to_decimal`, `to_int`, `parse_date` (formats `%a %d %b %Y`, `%d %b %Y`, `%Y-%m-%d`), `parse_amount` (`"JMD 0.1200"` → `("JMD", Decimal("0.12"))`). Invalid input returns `None`, never 0.
   - **Page parsers:** `parse_listed_companies(html, market_label) -> list[Company]`, `parse_trade_quotes(html, date) -> (list[Quote], list[Index])`, `parse_corporate_actions(html) -> list[CorporateAction]`.
   - Columns are matched by normalized header name, with a small alias table per field. A required table or header that is missing raises `ParseError(page, missing)`.
+  - The trade-quotes page **requires the quotes table**. A holiday shows that table's header with no rows. A page without the quotes table raises `ParseError` even if the indices table parses, so a renamed price header can't pass for a holiday. A missing indices table only warns.
+  - An **optional** field whose header matches no alias logs one warning per page ("column(s) not found, values will be null: …"), so it can't silently null a column. Skipped rows are reported as one count per page. Both reach the run summary (§6.3).
   - Original letter case is kept (v1 lowercased everything).
 - **`models.py`:** plain dataclasses with `Decimal`/`date` fields and a `to_json()` method for each.
 - **`store.py`:**
@@ -96,6 +99,7 @@ LICENSE  NOTICE  TERMS.md  README.md  CLAUDE.md
   - `merge(state, scrape_result, config, today) -> State` applies the rules in §6.
   - `write(state, site_dir)` emits the file tree in §5.
   - JSON is minified, UTF-8, with sorted keys for stable diffs.
+  - A file is rewritten only when something other than `meta.generated_at` changed. Unchanged files keep their bytes, so a holiday or quiet day commits only the files that really changed (`status.json` always changes, because it records `fetched_at`).
 - **`__main__.py`:**
   - Orchestration: load config and state, decide what is due (§3.3), fetch and parse each due dataset independently, merge, write.
   - Logs a summary and appends it to `$GITHUB_STEP_SUMMARY` when that is set.
@@ -107,12 +111,13 @@ LICENSE  NOTICE  TERMS.md  README.md  CLAUDE.md
 |---|---|---|
 | Trade quotes + indices (`/trading/trade-quotes/?market=50&date=<trading day>`) | every run | 1 |
 | Corporate actions (`/trading/corporate-actions/?instrumentCode=all-stocks&fromDate=&thruDate=`) | every run | 1 |
-| Listed companies (`/listings/listed-companies/?market=<code>` × 4) | last refresh ≥ `listings_every_days` ago, **or** quotes contain an unknown `instrument_code`, **or** `--refresh-listings`, **or** no stored listings | 4 |
+| Listed companies (`/listings/listed-companies/?market=<code>`) | **all 4 markets:** `--refresh-listings`, **or** no stored listings, **or** quotes contain an unknown `instrument_code` not already in `unmatched_codes`, **or** that market's last refresh ≥ `listings_every_days` ago. **One market alone:** its last fetch failed (retried every run until it succeeds) | 0–4 |
 
 - **Order:** quotes are fetched first, so an unknown instrument can trigger the listings refresh in the same run.
+- **Unmatched codes:** codes still unknown after a refresh of all markets are stored in `status.json` as `listings.unmatched_codes`. They don't trigger another refresh, so one instrument that never appears in the listings can't cost 4 extra requests every day. A code leaves the list when a later refresh finds it.
 - **Corporate-actions window:**
-  - normal run: `today − corporate_actions_window` through `today + corporate_actions_forward`
-  - first run, or no stored actions: `backfill_from` through `today + corporate_actions_forward`
+  - normal run: `max(backfill_from, last_success − corporate_actions_window)` through `today + corporate_actions_forward`, where `last_success` is `corporate_actions.as_of`. An outage of any length is caught up on the next good run.
+  - until the first successful fetch: `backfill_from` through `today + corporate_actions_forward`
 - **Trading day:** today in `America/Jamaica` (`zoneinfo`), moved back to Friday on a weekend. This fixes v1's mislabelling of local time as UTC.
 
 ## 4. Configuration (`config.toml`)
@@ -155,7 +160,7 @@ The output directory is passed on the CLI (`--out`). The cron schedule lives onl
 | Path | `data` |
 |---|---|
 | `/v2/index.json` | object: endpoint list, attribution, license, terms URL |
-| `/v2/status.json` | object keyed by dataset (`listings`, `quotes`, `indices`, `corporate_actions`): `{as_of, fetched_at, stale, last_error}` |
+| `/v2/status.json` | object keyed by dataset (`listings`, `quotes`, `indices`, `corporate_actions`): `{as_of, fetched_at, stale, last_error}`. `listings` also has `markets` (the same four fields per market label) and `unmatched_codes` (§3.3); its own `stale` is true if any market is stale, and its `as_of` is the oldest market refresh. |
 | `/v2/stocks.json` | array of stock entries (with `quote`) |
 | `/v2/stocks/{instrument_code}.json` | one stock entry plus `dividends` and `corporate_actions` arrays |
 | `/v2/indices.json` | array of `{name, date, value, change, change_pct, volume}` |
@@ -180,9 +185,10 @@ The output directory is passed on the CLI (`--out`). The cron schedule lives onl
 ```
 
 - `as_of` is the trading date of that file's data.
+- `generated_at` is when the file's content last changed (§3.2), not when the last run happened. `status.json` shows the last run.
 - `stale` is true if the dataset's latest due fetch failed.
 - Aggregate files use their dataset's status.
-- Per-stock files use `stale = listings.stale OR quotes.stale` and `as_of = quote date`, or the listings `as_of` if the instrument has no quote yet.
+- Per-stock files use `stale = quotes.stale OR <the stock's market>.stale`, so one failing market doesn't mark every stock stale. `as_of` is the quote date, or the market's `as_of` if the instrument has no quote yet.
 
 **Stock entry:**
 
@@ -223,26 +229,28 @@ The output directory is passed on the CLI (`--out`). The cron schedule lives onl
 |---|---|---|
 | Blocked (403/429, CloudFront block page) | `BlockedError` | No retry; no further JSE requests this run; stored data kept; every not-yet-fetched due dataset marked stale; exit 1 |
 | Transient (timeout, connection, 5xx) | `FetchError` after retries | That dataset stale, stored data kept, other datasets continue; exit 1 |
-| Layout change (table or required header missing) | `ParseError` | That dataset stale, stored data kept, message names page and header; exit 1 |
+| Layout change (table or required header missing, including a missing quotes table on an otherwise valid trade-quotes page) | `ParseError` | That dataset stale, stored data kept, message names page and header; exit 1 |
+| Optional header unmatched | warning | Not a failure; the field is `null` and the warning appears in the run summary |
 | No data (holiday) | parsed, zero quote rows | Not a failure; previous quotes and their `as_of` kept; `stale` false |
 
 `status.json` records `last_error` (class and message) for each failed dataset and clears it on the next success.
 
 ### 6.2 Merge rules
 
-- **Listings (only when refreshed):**
+- **Listings (only for markets fetched this run):**
   - companies are upserted by `instrument_code`, and new ones get `listed_since = today`;
-  - companies absent from the refresh get `listed = false` and `delisted_on = today`, **only if** all four market pages loaded successfully **and** the new count ≥ `(1 − max_listing_drop_pct/100) ×` the previous listed count;
-  - otherwise delistings are held and logged as a warning, not a failure.
+  - delisting is decided **per market**, and only for markets whose page loaded. A company previously listed in market M and not seen on any page fetched this run gets `listed = false` and `delisted_on = today`, **only if** M's page is non-empty **and** M's new count ≥ `(1 − max_listing_drop_pct/100) ×` M's previous listed count. A company that moved market is seen on its new market's page, so it isn't delisted.
+  - Otherwise M's delistings are held and logged as a warning, not a failure. An empty or truncated page for a small market therefore can't delist it wholesale.
+  - Each market has its own status. A failed market is stale and keeps its `as_of`, so it is retried on the next run; markets that loaded advance.
   - A previously delisted code that reappears is relisted (`listed = true`, `delisted_on = null`).
-- **Quotes:** replace each instrument's `quote` when its row is present; instruments without a row keep their previous quote. Unknown codes trigger the listings refresh (§3.3). If they are still unknown afterwards, they are logged and skipped.
+- **Quotes:** replace each instrument's `quote` when its row is present; instruments without a row keep their previous quote. Unknown codes trigger the listings refresh (§3.3). If they are still unknown afterwards, they are logged, skipped and recorded in `unmatched_codes`.
 - **Indices:** replaced wholesale when quotes succeed with rows.
 - **Corporate actions:** union with the stored set, deduplicated on `(symbol, type, record_date, ex_date, payment_date, amount, currency)`. Nothing is deleted.
 - **Validation:** rows missing `instrument_code` or `symbol` (listings, quotes) or `symbol` or `type` (actions) are skipped with a warning.
 
 ### 6.3 Logging
 
-Standard `logging` to stdout at INFO. The run summary covers requests made, datasets updated, stale or skipped, and counts added, updated and delisted.
+Standard `logging` to stdout at INFO. The run summary covers requests made, datasets updated, stale or skipped, and counts added, updated and delisted. It has a Warnings section that includes parser warnings (unmatched optional columns, skipped rows) and merge warnings (held delistings, unknown quote codes).
 
 ## 7. Workflows
 
@@ -263,7 +271,7 @@ Steps:
 2. `actions/setup-python` 3.12 with pip cache, then `pip install -r requirements.txt`.
 3. Check out the `data` branch into `site/`. If it doesn't exist, create an orphan branch containing `.nojekyll`.
 4. Run `python -m jamstockex build --out site [--refresh-listings]`, recording its exit code.
-5. Commit and push `site/` to `data` as `data: <trading day>` (github-actions bot), only if files changed. This step runs even if step 4 failed.
+5. Commit and push `site/` to `data` as `data: <trading day>` (github-actions bot), only if files changed. Unchanged files aren't rewritten (§3.2), so each commit holds only real changes. This step runs even if step 4 failed.
 6. Fail the job if step 4 exited non-zero. GitHub then emails the repo owner.
 
 **GitHub Pages:** configured once (manually) to deploy from branch `data`, root.
@@ -307,23 +315,28 @@ These documents are drafted from standard templates and are not legal advice.
 pytest, fully offline. TDD: a failing test before each parser and merge rule.
 
 - **Fixtures:**
-  - real HTML pages saved by the user from a browser (automated fetches from the dev environment are blocked): listed companies (one market), combined trade quotes, corporate actions;
+  - real HTML pages saved by the user from a browser (automated fetches from the dev environment are blocked) and kept out of git: listed companies (all four markets), combined trade quotes for a trading day and for a public holiday, corporate actions with a `thruDate` a year ahead;
+  - committed fixtures are synthetic copies of the real layouts;
   - variants made from them: a holiday quotes page with no rows, a quotes page with an inserted extra column, and a CloudFront block page.
 - **`test_parse.py`:**
   - each page parser against its fixture;
   - header matching still works with an inserted or reordered column;
-  - missing table or required header → `ParseError`;
+  - missing table or required header → `ParseError`, including a renamed price header while the indices still parse;
+  - an unmatched optional header logs one warning per page;
   - value parsers: commas, `$`, currency prefixes, every date format, garbage → `None`;
   - original case preserved.
 - **`test_store.py`:**
   - first-run load from an empty directory;
   - listings upsert, `listed_since`, delisting, and relisting;
-  - the delisting guard (count drop, and a failed market);
+  - the per-market delisting guard (count drop, an empty small-market page, a failed market, an instrument that moved market);
+  - per-market status: a failed market goes stale alone and recovers;
+  - `unmatched_codes` recorded after a full refresh and cleared when the code appears;
   - quotes replace and keep;
   - holiday handling;
   - corporate-action deduplication and symbol → code mapping (including ambiguous and unknown);
   - stale and `last_error` set and cleared;
-  - minified, deterministic output.
+  - minified, deterministic output;
+  - unchanged files keep their `generated_at`.
 - **`test_fetch.py`** (fake session via `monkeypatch`):
   - User-Agent and timeout are sent;
   - delay between requests;
@@ -333,16 +346,26 @@ pytest, fully offline. TDD: a failing test before each parser and merge rule.
 - **`test_build.py`:** end-to-end with a fake fetcher serving fixtures:
   - the full `v2/` tree and envelope on every file;
   - no `jamstockex.com` URL in any output;
-  - the due-dataset logic (listings refresh by age, unknown code, flag);
+  - the due-dataset logic (listings refresh by age, unknown code, flag; an unmatched code doesn't re-trigger; a failed market is retried alone);
+  - the corporate-actions window catching up after an outage;
+  - a holiday rewrites only the files whose content changed;
+  - parser warnings appear in the run summary;
   - exit codes, including one dataset failing while others publish.
+- **Real-page checks** (`test_parse_real.py`, local only, skipped when the pages are absent): every alias matches on every saved page, no page is paginated, the holiday page parses to zero quotes, and the market codes and labels match `config.toml`.
 - **Format checks:** plain assertion helpers (no `jsonschema` dependency).
 
 The live check is a manual `workflow_dispatch` run. It is not part of CI.
 
 ## 10. Implementation order and risks
 
-1. **Gate: confirm GitHub Actions can reach jamstockex.com.** A temporary `workflow_dispatch` job makes one request with the configured User-Agent and reports the status code. If it is blocked, **stop and revisit hosting**; never work around the block.
-2. User saves the HTML fixtures; confirm the real `instrument_code` format and the header names.
+1. **Gate: confirm GitHub Actions can reach jamstockex.com.** A temporary workflow makes one request to each page type (listed companies, trade quotes, and corporate actions with a future `thruDate`; 3 requests, 5 s apart) with the configured User-Agent, and reports each status code and table count. If any is blocked, **stop and revisit hosting**; never work around the block.
+2. The user saves the real pages listed in §9. Confirm:
+   - the real `instrument_code` format and the header names;
+   - that no page is paginated;
+   - how a holiday date is answered;
+   - that the market codes and labels match `config.toml`.
+
+   Pagination, or a holiday answered with the previous session's data, is a stop-and-redesign point.
 3. Build the package by TDD in this order: `config`, `fetch`, `parse`, `store`, `__main__`.
 4. Workflows, legal files, README and CLAUDE.md; remove the v1 files.
 5. First manual run (backfill), enable Pages, verify the endpoints; tag `v2.0.0`. Soft launch.

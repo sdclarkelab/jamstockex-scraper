@@ -91,15 +91,25 @@ jobs:
   probe:
     runs-on: ubuntu-latest
     steps:
-      - name: One request to the JSE listed-companies page
+      - name: One request to each JSE page type (3 requests, 5 s apart)
         run: |
-          code=$(curl -s -o body.html -w '%{http_code}' \
-            -A 'jamstockex-scraper/2.0 (+https://github.com/sdclarkelab/jamstockex-scraper)' \
-            'https://www.jamstockex.com/listings/listed-companies/?market=31')
-          echo "HTTP status: $code"
-          echo "Tables in raw HTML: $(grep -o '<table' body.html | wc -l)"
-          if grep -q 'Request blocked' body.html; then echo "::error::BLOCKED by CloudFront"; exit 1; fi
-          test "$code" = "200"
+          ua='jamstockex-scraper/2.0 (+https://github.com/sdclarkelab/jamstockex-scraper)'
+          base='https://www.jamstockex.com'
+          today=$(TZ=America/Jamaica date +%F)
+          next_year=$(TZ=America/Jamaica date -d '+365 days' +%F)
+          failed=0
+          for path in \
+            "/listings/listed-companies/?market=31" \
+            "/trading/trade-quotes/?market=50&date=$(TZ=America/Jamaica date -d 'last friday' +%F)" \
+            "/trading/corporate-actions/?instrumentCode=all-stocks&fromDate=${today:0:4}-01-01&thruDate=$next_year"
+          do
+            code=$(curl -s -o body.html -w '%{http_code}' -A "$ua" "$base$path")
+            echo "$path -> HTTP status: $code; tables in raw HTML: $(grep -o '<table' body.html | wc -l)"
+            if grep -q 'Request blocked' body.html; then echo "::error::BLOCKED by CloudFront"; exit 1; fi
+            if [ "$code" != "200" ]; then failed=1; fi
+            sleep 5
+          done
+          exit $failed
 ```
 
 - [ ] **Step 3: Commit, then ask the user for approval to push**
@@ -109,7 +119,7 @@ git add .github/workflows/probe-jse.yml
 git commit -m "ci: temporary JSE reachability probe" -m "Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 ```
 
-Ask the user: "OK to push the throwaway branch `probe/jse-reachability`? It runs one request to jamstockex.com from GitHub Actions." Push only after a yes:
+Ask the user: "OK to push the throwaway branch `probe/jse-reachability`? It sends 3 requests to jamstockex.com from GitHub Actions, one per page type, 5 s apart." Push only after a yes:
 
 ```bash
 git push -u origin probe/jse-reachability
@@ -119,13 +129,14 @@ gh run watch "$RUN_ID" --exit-status
 gh run view --log "$RUN_ID" | grep -E 'HTTP status|Tables in raw HTML|BLOCKED'
 ```
 
-Expected: `HTTP status: 200` and `Tables in raw HTML: ` followed by a number ≥ 1.
+Expected: three lines (listed companies, trade quotes, corporate actions with a `thruDate` a year ahead), each with `HTTP status: 200` and `tables in raw HTML: ` followed by a number ≥ 1.
 
 - [ ] **Step 4: Decide**
 
-- **200 with tables ≥ 1:** proceed.
+- **All three 200 with tables ≥ 1:** proceed.
 - **Blocked (403, 429 or "BLOCKED"):** STOP. Report to the user and do not continue the plan.
 - **200 with 0 tables:** the tables are rendered by JavaScript, so `requests` can't see them. STOP and report.
+- **Corporate actions not 200, or 0 tables, while the others are fine:** the site may reject a future `thruDate`. STOP and report; `corporate_actions_forward` may need to become 0.
 
 - [ ] **Step 5: Clean up (ask before deleting the remote branch)**
 
@@ -1084,6 +1095,7 @@ git commit -m "feat: add polite fetcher that never retries a block" -m "Co-Autho
   - `ParseError(page: str, problem: str)`
   - table helpers: `normalize_header(text) -> str`, `header_index(table) -> dict[str, int]`, `resolve_columns(header, aliases) -> dict[str, int | None]`, `matching_tables(soup, aliases, required) -> list[tuple[Tag, dict[str, int | None]]]`, `data_rows(table) -> list[Tag]`
   - cell helpers: `cell_text(cells, idx) -> str`, `cell_href(cells, idx) -> str | None`, `instrument_code_from_href(href) -> str | None`, `row_instrument_code(row) -> str | None`
+  - `warn_missing_columns(page, column_sets, ignore=()) -> None`: logs one warning per page naming optional fields whose header matched no alias. `data_rows` also drops blank spacer rows.
   - value parsers: `to_decimal(text) -> Decimal | None`, `to_int(text) -> int | None`, `parse_date(text) -> date | None`, `parse_amount(text) -> tuple[str | None, Decimal | None]`, `normalize_action_type(text) -> str`
 
 - [ ] **Step 1: Write the failing tests**
@@ -1100,7 +1112,7 @@ from bs4 import BeautifulSoup
 from jamstockex.parse import (
     cell_href, cell_text, data_rows, header_index, instrument_code_from_href, matching_tables,
     normalize_action_type, normalize_header, parse_amount, parse_date, resolve_columns,
-    row_instrument_code, to_decimal, to_int,
+    row_instrument_code, to_decimal, to_int, warn_missing_columns,
 )
 
 
@@ -1181,6 +1193,7 @@ TABLE_HTML = """
   <tr><th>Symbol</th><th>Closing Price ($)</th><th>Website</th></tr>
   <tr><td><a href="/i/?instrument=ACME-JMD">ACME</a></td><td> 12.50 </td><td><a href="https://acme.example">Visit</a></td></tr>
   <tr><td colspan="3">Footnote</td></tr>
+  <tr><td> </td><td></td><td></td></tr>
 </table>
 <table><tr><th>Other</th></tr><tr><td>x</td></tr></table>
 """
@@ -1208,6 +1221,15 @@ def test_table_helpers():
     assert cell_href(cells, 1) is None
     assert row_instrument_code(rows[0]) == "ACME-JMD"
     assert row_instrument_code(rows[1]) is None
+
+
+def test_warn_missing_columns(caplog):
+    cols = [{"symbol": 0, "close": None, "volume": None}, {"symbol": 0, "close": None, "volume": 3}]
+    warn_missing_columns("trade-quotes", cols, ignore=("volume",))
+    assert caplog.messages == ["trade-quotes: column(s) not found, values will be null: close"]
+    caplog.clear()
+    warn_missing_columns("trade-quotes", [{"symbol": 0}])
+    assert caplog.messages == []
 ```
 
 - [ ] **Step 2: Run the tests to verify they fail**
@@ -1287,7 +1309,19 @@ def matching_tables(soup: BeautifulSoup, aliases: Aliases, required: tuple[str, 
 
 
 def data_rows(table: Tag) -> list[Tag]:
-    return [row for row in table.find_all("tr")[1:] if row.find_all("td")]
+    """Rows after the header that have cells and some text (blank spacer rows are dropped)."""
+    return [row for row in table.find_all("tr")[1:] if row.find_all("td") and row.get_text(strip=True)]
+
+
+def warn_missing_columns(page: str, column_sets: list[Columns], ignore: tuple[str, ...] = ()) -> None:
+    """Warn once per page about optional fields whose header matched no alias.
+
+    Required fields raise ParseError instead. Without this warning, a renamed optional
+    header would silently turn every value in that column into null.
+    """
+    missing = sorted({f for cols in column_sets for f, idx in cols.items() if idx is None} - set(ignore))
+    if missing:
+        log.warning("%s: column(s) not found, values will be null: %s", page, ", ".join(missing))
 
 
 def cell_text(cells: list[Tag], idx: int | None) -> str:
@@ -1376,7 +1410,7 @@ def normalize_action_type(text: str | None) -> str:
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_parse_values.py -q`
-Expected: `49 passed`.
+Expected: `50 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -1395,7 +1429,7 @@ git commit -m "feat: add header-matched table helpers and null-safe value parser
 
 **Interfaces:**
 - Consumes: the Task 5 helpers and `Company`.
-- Produces: `LISTING_COLUMNS: Aliases` and `parse_listed_companies(html: str, market_label: str) -> list[Company]`, which raises `ParseError` when no listings table is present.
+- Produces: `LISTING_COLUMNS: Aliases` and `parse_listed_companies(html: str, market_label: str) -> list[Company]`, which raises `ParseError` when no listings table is present. It logs one warning per page for unmatched optional columns and one for skipped rows (never one per row), because parser warnings are copied into the run summary (Task 12).
 
 - [ ] **Step 1: Create the fixtures**
 
@@ -1491,6 +1525,15 @@ def test_jse_links_are_never_used_as_website():
     )
     companies = {c.instrument_code: c for c in parse_listed_companies(html, "Main Market")}
     assert companies["ACME-JMD"].website is None
+
+
+def test_skipped_rows_and_missing_columns_are_warned_once(caplog):
+    html = fixture_html("listed-companies.html").replace("<th>Sector</th>", "<th>Industry Group</th>")
+    parse_listed_companies(html, "Main Market")
+    assert caplog.messages == [
+        "listed-companies (Main Market): column(s) not found, values will be null: sector",
+        "listed-companies (Main Market): skipped 1 row(s) without an instrument link or symbol",
+    ]
 ```
 
 - [ ] **Step 3: Run the tests to verify they fail**
@@ -1529,15 +1572,16 @@ def parse_listed_companies(html: str, market_label: str) -> list[Company]:
     tables = matching_tables(soup, LISTING_COLUMNS, ("name", "symbol"))
     if not tables:
         raise ParseError("listed-companies", "no table with 'security' and 'symbol' columns")
+    warn_missing_columns(f"listed-companies ({market_label})", [cols for _, cols in tables])
     companies: dict[str, Company] = {}
+    skipped = 0
     for table, cols in tables:
         for row in data_rows(table):
             cells = row.find_all("td")
             code = row_instrument_code(row)
             symbol = cell_text(cells, cols["symbol"])
             if not code or not symbol:
-                log.warning("listed-companies (%s): skipping row without instrument code or symbol: %r",
-                            market_label, cell_text(cells, 0))
+                skipped += 1
                 continue
             companies.setdefault(code, Company(
                 instrument_code=code,
@@ -1549,13 +1593,16 @@ def parse_listed_companies(html: str, market_label: str) -> list[Company]:
                 type=cell_text(cells, cols["type"]) or None,
                 website=_website(cells, cols["website"]),
             ))
+    if skipped:
+        log.warning("listed-companies (%s): skipped %d row(s) without an instrument link or symbol",
+                    market_label, skipped)
     return list(companies.values())
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_parse_listings.py -q`
-Expected: `4 passed`.
+Expected: `5 passed`.
 
 - [ ] **Step 6: Commit**
 
@@ -1577,7 +1624,7 @@ git commit -m "feat: parse listed companies by header name" -m "Co-Authored-By: 
 - Produces:
   - `QUOTE_COLUMNS` and `INDEX_COLUMNS`
   - `compute_change_pct(close, change) -> Decimal | None`
-  - `parse_trade_quotes(html: str, trade_date: date) -> tuple[dict[str, Quote], list[Index]]`, which returns empty results for a holiday page and raises `ParseError` when neither a quotes table nor an indices table is present
+  - `parse_trade_quotes(html: str, trade_date: date) -> tuple[dict[str, Quote], list[Index]]`. A holiday page (a quotes table with a header but no rows) returns empty results. A page with **no quotes table** raises `ParseError`, even if the indices table parses, so a renamed price header fails the run instead of looking like a holiday. A missing indices table only logs a warning.
 
 - [ ] **Step 1: Create the fixtures**
 
@@ -1676,9 +1723,10 @@ def test_parses_indices():
     ]
 
 
-def test_inserted_and_reordered_columns_still_parse_and_page_pct_is_used():
+def test_inserted_and_reordered_columns_still_parse_and_page_pct_is_used(caplog):
     quotes, indices = parse_trade_quotes(fixture_html("trade-quotes-extra-column.html"), DAY)
     assert indices == []
+    assert "trade-quotes: no indices table (with 'index' and 'value' columns) found" in caplog.messages
     assert quotes["ACME-JMD"] == Quote(date=DAY, close=Decimal("12.50"), change=Decimal("-0.25"),
                                        change_pct=Decimal("-1.95"), volume=48213)
 
@@ -1690,6 +1738,21 @@ def test_holiday_page_returns_empty_results():
 def test_page_without_tables_raises():
     with pytest.raises(ParseError, match="trade-quotes"):
         parse_trade_quotes("<html><body>Down for maintenance</body></html>", DAY)
+
+
+def test_renamed_price_header_raises_even_when_indices_parse():
+    html = (fixture_html("trade-quotes.html")
+            .replace("Closing Price ($)", "Close ($)").replace("Last Traded Price ($)", "Last ($)"))
+    with pytest.raises(ParseError, match="no quotes table"):
+        parse_trade_quotes(html, DAY)
+
+
+def test_renamed_optional_header_is_warned(caplog):
+    html = fixture_html("trade-quotes.html").replace("<th>Price Change ($)</th><th>Volume</th>",
+                                                     "<th>Price Change ($)</th><th>Shares</th>")
+    quotes, _ = parse_trade_quotes(html, DAY)
+    assert quotes["ACME-JMD"].volume is None
+    assert "trade-quotes: column(s) not found, values will be null: volume" in caplog.messages
 
 
 @pytest.mark.parametrize("close, change, expected", [
@@ -1749,16 +1812,23 @@ def parse_trade_quotes(html: str, trade_date: dt.date) -> tuple[dict[str, Quote]
         for table, cols in matching_tables(soup, INDEX_COLUMNS, ("name", "value"))
         if "symbol" not in header_index(table)
     ]
-    if not quote_tables and not index_tables:
-        raise ParseError("trade-quotes", "no quotes table (symbol + closing price) or indices table found")
+    # A holiday page still has the quotes table header, just no rows. No quotes table at all
+    # means the layout changed, which must fail loudly rather than look like a holiday.
+    if not quote_tables:
+        raise ParseError("trade-quotes", "no quotes table with 'symbol' and 'closing price' columns")
+    if not index_tables:
+        log.warning("trade-quotes: no indices table (with 'index' and 'value' columns) found")
+    warn_missing_columns("trade-quotes", [cols for _, cols in quote_tables], ignore=("change_pct",))
+    warn_missing_columns("trade-quotes (indices)", [cols for _, cols in index_tables])
 
     quotes: dict[str, Quote] = {}
+    skipped = 0
     for table, cols in quote_tables:
         for row in data_rows(table):
             cells = row.find_all("td")
             code = row_instrument_code(row)
             if not code:
-                log.warning("trade-quotes: skipping row without instrument link: %r", cell_text(cells, cols["symbol"]))
+                skipped += 1
                 continue
             close = to_decimal(cell_text(cells, cols["close"]))
             change = to_decimal(cell_text(cells, cols["change"]))
@@ -1772,6 +1842,9 @@ def parse_trade_quotes(html: str, trade_date: dt.date) -> tuple[dict[str, Quote]
                 change_pct=change_pct,
                 volume=to_int(cell_text(cells, cols["volume"])),
             ))
+
+    if skipped:
+        log.warning("trade-quotes: skipped %d row(s) without an instrument link", skipped)
 
     indices: dict[str, Index] = {}
     for table, cols in index_tables:
@@ -1794,7 +1867,7 @@ def parse_trade_quotes(html: str, trade_date: dt.date) -> tuple[dict[str, Quote]
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_parse_quotes.py -q`
-Expected: `10 passed`.
+Expected: `12 passed`.
 
 - [ ] **Step 6: Commit**
 
@@ -1813,7 +1886,7 @@ git commit -m "feat: parse trade quotes and indices by header name" -m "Co-Autho
 
 **Interfaces:**
 - Consumes: the Task 5 helpers and `CorporateAction`.
-- Produces: `ACTION_COLUMNS` and `parse_corporate_actions(html: str) -> list[CorporateAction]`. The result is deduplicated by `.key()`, symbols are upper-cased, `instrument_code` comes from a row link when one exists (otherwise `None`), and a missing table raises `ParseError`.
+- Produces: `ACTION_COLUMNS` and `parse_corporate_actions(html: str) -> list[CorporateAction]`. The result is deduplicated by `.key()`, symbols are upper-cased, `instrument_code` comes from a row link when one exists (otherwise `None`), and a missing table raises `ParseError`. `execution date` (the v1 name) is an alias for `ex_date`.
 
 - [ ] **Step 1: Create the fixture**
 
@@ -1850,7 +1923,7 @@ from jamstockex.parse import ParseError, parse_corporate_actions
 from tests.helpers import fixture_html
 
 
-def test_parses_dedupes_and_normalises():
+def test_parses_dedupes_and_normalises(caplog):
     actions = parse_corporate_actions(fixture_html("corporate-actions.html"))
     assert actions == [
         CorporateAction(symbol="ACME", type="dividend", amount=Decimal("0.7500"), currency="JMD",
@@ -1863,6 +1936,12 @@ def test_parses_dedupes_and_normalises():
                         record_date=dt.date(2026, 4, 14), ex_date=dt.date(2026, 4, 14),
                         payment_date=None, instrument_code=None),
     ]
+    assert caplog.messages == []  # the blank spacer row is dropped silently
+
+
+def test_execution_date_header_is_an_ex_date_alias():
+    html = fixture_html("corporate-actions.html").replace("<th>Ex-Date</th>", "<th>Execution Date</th>")
+    assert parse_corporate_actions(html)[0].ex_date == dt.date(2026, 11, 18)
 
 
 def test_missing_table_raises():
@@ -1887,7 +1966,7 @@ ACTION_COLUMNS: Aliases = {
     "type": ("action", "corporateaction", "actiontype"),
     "amount": ("dividendamount", "amount", "rate"),
     "record_date": ("recorddate",),
-    "ex_date": ("exdate", "exdividenddate"),
+    "ex_date": ("exdate", "exdividenddate", "executiondate"),  # v1 called this column "execution date"
     "payment_date": ("paymentdate", "paymentduedate", "paymentdue", "payabledate"),
 }
 
@@ -1897,13 +1976,15 @@ def parse_corporate_actions(html: str) -> list[CorporateAction]:
     tables = matching_tables(soup, ACTION_COLUMNS, ("symbol", "amount"))
     if not tables:
         raise ParseError("corporate-actions", "no table with 'instrument' and 'dividend amount' columns")
+    warn_missing_columns("corporate-actions", [cols for _, cols in tables])
     actions: dict[tuple, CorporateAction] = {}
+    skipped = 0
     for table, cols in tables:
         for row in data_rows(table):
             cells = row.find_all("td")
             symbol = cell_text(cells, cols["symbol"]).upper()
             if not symbol:
-                log.warning("corporate-actions: skipping row without instrument")
+                skipped += 1
                 continue
             currency, amount = parse_amount(cell_text(cells, cols["amount"]))
             action = CorporateAction(
@@ -1917,13 +1998,15 @@ def parse_corporate_actions(html: str) -> list[CorporateAction]:
                 instrument_code=row_instrument_code(row),
             )
             actions.setdefault(action.key(), action)
+    if skipped:
+        log.warning("corporate-actions: skipped %d row(s) without an instrument", skipped)
     return list(actions.values())
 ```
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_parse_actions.py -q`, then the full suite with `.venv/bin/pytest -q`.
-Expected: `2 passed`, and the full suite all green.
+Expected: `3 passed`, and the full suite all green.
 
 - [ ] **Step 6: Commit**
 
@@ -1936,7 +2019,11 @@ git commit -m "feat: parse dividends and other corporate actions" -m "Co-Authore
 
 ### Task 9: Verify the parsers against real JSE pages
 
-**Why:** the synthetic fixtures use the header names the portfolio-tracker verified in June 2026, but the live site may differ. This task confirms the parsers against real pages and records the real `instrument_code` format.
+**Why:** the synthetic fixtures use the header names the portfolio-tracker verified in June 2026, but the live site may differ. This task confirms the parsers against real pages and records the real `instrument_code` format. It also checks four assumptions the build depends on:
+- every market's listings page has the same layout;
+- no page is paginated;
+- a no-trading day returns an empty quotes table rather than an error page or the previous session's data;
+- the corporate-actions page accepts a `thruDate` in the future.
 
 **Files:**
 - Create: `tests/test_parse_real.py`, `tests/fixtures/README.md`
@@ -1946,10 +2033,16 @@ git commit -m "feat: parse dividends and other corporate actions" -m "Co-Authore
 
 - [ ] **Step 1: Ask the user to save three pages from their browser**
 
-Ask the user: "Please open these three pages in your browser and save each with **Save Page As → Webpage, HTML Only** into `tests/fixtures/real/`, which is gitignored and never committed:
-1. Listings → Listed Companies → Main Market → `listed-companies-31.html`
-2. Trading → Trade Quotes → Combined Market (any recent trading day) → `trade-quotes-combined.html`
-3. Trading → Corporate Actions → All stocks, from 1 Jan this year to today → `corporate-actions.html`"
+Ask the user: "Please open these pages in your browser and save each with **Save Page As → Webpage, HTML Only** into `tests/fixtures/real/`, which is gitignored and never committed. The site paths are the ones the scraper uses (see `jamstockex/build.py`); you can type them after the site's address:
+1. `/listings/listed-companies/?market=31` (Main Market) → `listed-companies-31.html`
+2. `/listings/listed-companies/?market=22` (Junior Market) → `listed-companies-22.html`
+3. `/listings/listed-companies/?market=51` (Bond Market) → `listed-companies-51.html`
+4. `/listings/listed-companies/?market=49` (USD Market) → `listed-companies-49.html`
+5. `/trading/trade-quotes/?market=50&date=<a recent trading day>` → `trade-quotes-combined.html`
+6. `/trading/trade-quotes/?market=50&date=2026-10-19` (National Heroes Day, no trading) → `trade-quotes-holiday.html`
+7. `/trading/corporate-actions/?instrumentCode=all-stocks&fromDate=2026-01-01&thruDate=<today + 1 year>` → `corporate-actions.html`
+
+While you're on each page, please tell me if it shows page numbers or a 'next page' link, and whether the market labels (Main Market, Junior Market, Bond Market, USD Market) match what the site shows for codes 31, 22, 51 and 49."
 
 Wait until the files exist:
 
@@ -1968,13 +2061,23 @@ Skipped when the files are absent (e.g. in CI). See tests/fixtures/README.md.
 """
 
 import datetime as dt
+import re
 
 import pytest
+from bs4 import BeautifulSoup
 
-from jamstockex.parse import parse_corporate_actions, parse_listed_companies, parse_trade_quotes
-from tests.helpers import FIXTURES
+from jamstockex.parse import (
+    ACTION_COLUMNS, INDEX_COLUMNS, LISTING_COLUMNS, QUOTE_COLUMNS, matching_tables,
+    parse_corporate_actions, parse_listed_companies, parse_trade_quotes,
+)
+from tests.helpers import FIXTURES, ROOT
 
 REAL = FIXTURES / "real"
+MARKETS = {31: "Main Market", 22: "Junior Market", 51: "Bond Market", 49: "USD Market"}
+PAGES = [f"listed-companies-{code}.html" for code in MARKETS] + [
+    "trade-quotes-combined.html", "trade-quotes-holiday.html", "corporate-actions.html",
+]
+PAGINATION = re.compile(r"[?&](page|paged|offset|start)=\d|class=\"[^\"]*pagination|rel=\"next\"", re.IGNORECASE)
 
 
 def real(name: str) -> str:
@@ -1984,9 +2087,10 @@ def real(name: str) -> str:
     return path.read_text(encoding="utf-8", errors="replace")
 
 
-def test_real_listed_companies():
-    companies = parse_listed_companies(real("listed-companies-31.html"), "Main Market")
-    assert len(companies) > 20
+@pytest.mark.parametrize("code, label", MARKETS.items())
+def test_real_listed_companies(code, label):
+    companies = parse_listed_companies(real(f"listed-companies-{code}.html"), label)
+    assert companies, f"{label}: no companies parsed"
     assert all(c.instrument_code and c.symbol and c.name for c in companies)
     assert sum(1 for c in companies if c.currency) >= 0.9 * len(companies)
 
@@ -1994,10 +2098,16 @@ def test_real_listed_companies():
 def test_real_trade_quotes():
     quotes, indices = parse_trade_quotes(real("trade-quotes-combined.html"), dt.date(2026, 11, 9))
     assert len(quotes) > 20
-    assert sum(1 for q in quotes.values() if q.close is not None) >= 0.9 * len(quotes)
-    assert sum(1 for q in quotes.values() if q.volume is not None) >= 0.9 * len(quotes)
+    for field in ("close", "change", "volume"):
+        assert sum(1 for q in quotes.values() if getattr(q, field) is not None) >= 0.9 * len(quotes), field
     assert len(indices) >= 1
     assert all(i.value is not None for i in indices)
+
+
+def test_real_holiday_page_is_empty_not_an_error():
+    """Also catches the site answering a holiday date with the previous session's quotes."""
+    quotes, _ = parse_trade_quotes(real("trade-quotes-holiday.html"), dt.date(2026, 10, 19))
+    assert quotes == {}
 
 
 def test_real_corporate_actions():
@@ -2005,19 +2115,52 @@ def test_real_corporate_actions():
     dividends = [a for a in actions if a.type == "dividend"]
     assert dividends
     assert sum(1 for a in dividends if a.amount is not None and a.currency) >= 0.9 * len(dividends)
-    assert sum(1 for a in actions if a.record_date is not None) >= 0.9 * len(actions)
+    for field in ("record_date", "ex_date", "payment_date"):
+        assert sum(1 for a in dividends if getattr(a, field) is not None) >= 0.9 * len(dividends), field
+
+
+@pytest.mark.parametrize("name, aliases, required, may_be_missing", [
+    *[(f"listed-companies-{code}.html", LISTING_COLUMNS, ("name", "symbol"), {"website"}) for code in MARKETS],
+    ("trade-quotes-combined.html", QUOTE_COLUMNS, ("symbol", "close"), {"change_pct"}),
+    ("trade-quotes-combined.html", INDEX_COLUMNS, ("name", "value"), set()),
+    ("corporate-actions.html", ACTION_COLUMNS, ("symbol", "amount"), set()),
+])
+def test_real_every_column_resolves(name, aliases, required, may_be_missing):
+    """A field whose header matches no alias would be silently null on every row."""
+    tables = matching_tables(BeautifulSoup(real(name), "html.parser"), aliases, required)
+    assert tables
+    unresolved = {f for _, cols in tables for f, idx in cols.items() if idx is None} - may_be_missing
+    assert unresolved == set(), f"{name}: add the real header names to the alias tuples for {unresolved}"
+
+
+@pytest.mark.parametrize("name", PAGES)
+def test_real_pages_are_not_paginated(name):
+    """The scraper reads one page per request. Pagination would silently drop rows."""
+    assert not PAGINATION.search(real(name)), f"{name} looks paginated; STOP and tell the user"
 
 
 def test_real_listing_and_quote_codes_line_up():
     listed = {c.instrument_code for c in parse_listed_companies(real("listed-companies-31.html"), "Main Market")}
     quotes, _ = parse_trade_quotes(real("trade-quotes-combined.html"), dt.date(2026, 11, 9))
     assert len(listed & set(quotes)) >= 0.5 * len(listed)
+
+
+def test_real_market_labels_match_config():
+    text = (ROOT / "config.toml").read_text(encoding="utf-8")
+    for code, label in MARKETS.items():
+        assert f'{code} = "{label}"' in text
 ```
 
 - [ ] **Step 3: Run them**
 
 Run: `.venv/bin/pytest tests/test_parse_real.py -v`
-Expected: `4 passed`. If any fail, go to Step 4; otherwise skip to Step 5.
+Expected: all 23 tests pass (most are parametrised). If any fail, go to Step 4; otherwise skip to Step 5.
+
+**Stop conditions. Report to the user before changing any code:**
+- `test_real_pages_are_not_paginated` fails, or the user saw page numbers: the scraper would need to follow pages, which changes the request budget.
+- `test_real_holiday_page_is_empty_not_an_error` fails because quotes came back: the site answers a holiday date with the previous session's data, so `Quote.date` would be wrong. The parser would need to read the trading date from the page.
+- The holiday page raises `ParseError`: real holiday pages have no quotes table, so the holiday rule in `parse_trade_quotes` needs a page-specific "no trades" marker.
+- A market's labels or codes differ from `config.toml`.
 
 - [ ] **Step 4: If a test fails, inspect the real headers and fix the aliases**
 
@@ -2038,7 +2181,7 @@ for path in sorted(Path("tests/fixtures/real").glob("*.html")):
 EOF
 ```
 
-For each field that didn't resolve, add the printed normalised header name to that field's alias tuple in `jamstockex/parse.py` (`LISTING_COLUMNS`, `QUOTE_COLUMNS`, `INDEX_COLUMNS` or `ACTION_COLUMNS`). Then change the matching `<th>` text in the synthetic fixture, so the committed tests reflect the real layout. Re-run `.venv/bin/pytest -q` until it's all green.
+For each field that didn't resolve (`test_real_every_column_resolves` names them), add the printed normalised header name to that field's alias tuple in `jamstockex/parse.py` (`LISTING_COLUMNS`, `QUOTE_COLUMNS`, `INDEX_COLUMNS` or `ACTION_COLUMNS`). If a field genuinely doesn't exist on a page, add it to that page's `may_be_missing` set in the test, with a comment. Then change the matching `<th>` text in the synthetic fixture, so the committed tests reflect the real layout. Re-run `.venv/bin/pytest -q` until it's all green.
 
 If the corporate-actions instrument cell contains more than the symbol (e.g. a company name), adjust `parse_corporate_actions` to take the first whitespace-separated token: `cell_text(...).split()[0].upper()` guarded for empty. Add a fixture row and a test for it.
 
@@ -2088,12 +2231,12 @@ git commit -m "test: verify parsers against real JSE page layouts" -m "Co-Author
 - Produces:
   - `DATASETS`, `SOURCE`, `TERMS_URL`, `LICENSE`, `ATTRIBUTION`
   - `DatasetStatus(as_of=None, fetched_at=None, stale=False, last_error=None)` with `to_json`/`from_json`
-  - `State(companies: dict[str, Company], indices: list[Index], actions: list[CorporateAction], status: dict[str, DatasetStatus])`
+  - `State(companies: dict[str, Company], indices: list[Index], actions: list[CorporateAction], status: dict[str, DatasetStatus], markets: dict[str, DatasetStatus], unmatched: set[str])`. `markets` is keyed by market label; `unmatched` holds quote codes that a full listings refresh didn't explain. Both are persisted in `status.json` under `data.listings.markets` and `data.listings.unmatched_codes`.
   - functions:
     - `utc_timestamp(datetime) -> str`
     - `safe_filename(code) -> str`
     - `load(site_dir: Path, api_version: str) -> State`
-    - `write(state: State, site_dir: Path, *, api_version: str, now: datetime) -> None`
+    - `write(state: State, site_dir: Path, *, api_version: str, now: datetime) -> None`. A per-stock file's `stale` is `quotes.stale OR <its market>.stale`. A file is **not rewritten** if only `generated_at` would change, so `generated_at` means "content last changed" and holidays don't churn the data branch.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2135,7 +2278,13 @@ def sample_state() -> store.State:
                         record_date=dt.date(2026, 5, 1), ex_date=None, payment_date=None,
                         instrument_code=None),
     ]
-    state.status["listings"] = store.DatasetStatus(as_of=DAY, fetched_at=NOW)
+    state.status["listings"] = store.DatasetStatus(as_of=DAY, fetched_at=NOW, stale=True,
+                                                   last_error="USD Market: FetchError: x")
+    state.markets = {
+        "Main Market": store.DatasetStatus(as_of=DAY, fetched_at=NOW),
+        "USD Market": store.DatasetStatus(as_of=DAY, fetched_at=NOW, stale=True, last_error="FetchError: x"),
+    }
+    state.unmatched = {"GAMMA-JMD"}
     state.status["quotes"] = store.DatasetStatus(as_of=DAY, fetched_at=NOW)
     state.status["indices"] = store.DatasetStatus(as_of=DAY, fetched_at=NOW)
     state.status["corporate_actions"] = store.DatasetStatus(as_of=None, stale=True, last_error="FetchError: boom")
@@ -2145,6 +2294,7 @@ def sample_state() -> store.State:
 def test_load_from_empty_dir_gives_empty_state(tmp_path):
     state = store.load(tmp_path / "site", "v2")
     assert state.companies == {} and state.indices == [] and state.actions == []
+    assert state.markets == {} and state.unmatched == set()
     assert set(state.status) == set(store.DATASETS)
     assert all(s == store.DatasetStatus() for s in state.status.values())
 
@@ -2167,13 +2317,15 @@ def test_write_creates_the_v2_tree_with_envelopes(tmp_path):
 def test_meta_as_of_and_stale_follow_dataset_status(tmp_path):
     store.write(sample_state(), tmp_path, api_version="v2", now=NOW)
     base = tmp_path / "v2"
-    assert read_json(base / "stocks.json")["meta"]["stale"] is False
+    assert read_json(base / "stocks.json")["meta"]["stale"] is True  # listings stale: one market failed
     assert read_json(base / "stocks.json")["meta"]["as_of"] == "2026-11-09"
     assert read_json(base / "corporate-actions.json")["meta"]["stale"] is True
     assert read_json(base / "corporate-actions.json")["meta"]["as_of"] is None
     assert read_json(base / "status.json")["meta"]["stale"] is True  # any dataset stale
     beta = read_json(base / "stocks" / "BETA-USD.json")
-    assert beta["meta"]["as_of"] == "2026-11-09"  # no quote -> listings as_of
+    assert beta["meta"]["as_of"] == "2026-11-09"  # no quote -> its market's as_of
+    assert beta["meta"]["stale"] is True  # USD Market failed
+    assert read_json(base / "stocks" / "ACME-JMD.json")["meta"]["stale"] is False  # Main Market is fine
 
 
 def test_per_stock_file_has_actions_and_dividends(tmp_path):
@@ -2193,6 +2345,9 @@ def test_aggregate_files(tmp_path):
     status = read_json(base / "status.json")["data"]
     assert status["corporate_actions"] == {"as_of": None, "fetched_at": None, "stale": True,
                                            "last_error": "FetchError: boom"}
+    assert status["listings"]["markets"]["USD Market"]["last_error"] == "FetchError: x"
+    assert status["listings"]["markets"]["Main Market"]["stale"] is False
+    assert status["listings"]["unmatched_codes"] == ["GAMMA-JMD"]
     index = read_json(base / "index.json")["data"]
     assert index["endpoints"]["stock"] == "stocks/{instrument_code}.json"
     assert index["attribution_required"] == store.ATTRIBUTION
@@ -2216,6 +2371,24 @@ def test_write_then_load_round_trips(tmp_path):
     assert loaded.indices == original.indices
     assert sorted(loaded.actions, key=lambda a: a.key()) == sorted(original.actions, key=lambda a: a.key())
     assert loaded.status == original.status
+    assert loaded.markets == original.markets
+    assert loaded.unmatched == original.unmatched
+
+
+def test_unchanged_files_keep_their_generated_at(tmp_path):
+    store.write(sample_state(), tmp_path, api_version="v2", now=NOW)
+    changed = sample_state()
+    changed.companies["ACME-JMD"].quote.close = Decimal("13")
+    store.write(changed, tmp_path, api_version="v2", now=NOW + dt.timedelta(days=1))
+    base = tmp_path / "v2"
+
+    def generated_at(name):
+        return read_json(base / name)["meta"]["generated_at"]
+
+    assert generated_at("indices.json") == "2026-11-09T22:30:05Z"
+    assert generated_at("stocks/BETA-USD.json") == "2026-11-09T22:30:05Z"
+    assert generated_at("stocks.json") == "2026-11-10T22:30:05Z"
+    assert generated_at("stocks/ACME-JMD.json") == "2026-11-10T22:30:05Z"
 
 
 def test_safe_filename():
@@ -2235,6 +2408,8 @@ Expected: `ImportError: cannot import name 'store'`.
 
 `load` reads the v2 tree from the site directory (a checkout of the `data`
 branch), `merge` folds in a new scrape, and `write` emits the tree again.
+A file whose content hasn't changed is left untouched (it keeps its old
+`generated_at`), so the data branch only records real changes.
 """
 
 from __future__ import annotations
@@ -2306,6 +2481,10 @@ class State:
     indices: list[Index] = field(default_factory=list)
     actions: list[CorporateAction] = field(default_factory=list)
     status: dict[str, DatasetStatus] = field(default_factory=_empty_status)
+    # Per listings market, keyed by market label (the value of Company.market).
+    markets: dict[str, DatasetStatus] = field(default_factory=dict)
+    # Quote codes that a full listings refresh didn't explain. They don't trigger another refresh.
+    unmatched: set[str] = field(default_factory=set)
 
 
 # --- load -----------------------------------------------------------------
@@ -2328,6 +2507,9 @@ def load(site_dir: Path, api_version: str) -> State:
         for name, data in status.items():
             if name in state.status:
                 state.status[name] = DatasetStatus.from_json(data)
+        listings = status.get("listings", {})
+        state.markets = {label: DatasetStatus.from_json(d) for label, d in listings.get("markets", {}).items()}
+        state.unmatched = set(listings.get("unmatched_codes", []))
     return state
 
 
@@ -2364,8 +2546,12 @@ def write(state: State, site_dir: Path, *, api_version: str, now: dt.datetime) -
     companies = sorted(state.companies.values(), key=lambda c: c.instrument_code)
     actions = sorted(state.actions, key=_action_sort_key)
 
+    status_data = {n: s.to_json() for n, s in status.items()}
+    status_data["listings"]["markets"] = {label: m.to_json() for label, m in sorted(state.markets.items())}
+    status_data["listings"]["unmatched_codes"] = sorted(state.unmatched)
+
     _dump(base / "index.json", meta(stock_as_of, any_stale), _index_data())
-    _dump(base / "status.json", meta(stock_as_of, any_stale), {n: s.to_json() for n, s in status.items()})
+    _dump(base / "status.json", meta(stock_as_of, any_stale), status_data)
     _dump(base / "stocks.json", meta(stock_as_of, stock_stale), [c.to_json() for c in companies])
     _dump(
         base / "indices.json",
@@ -2386,8 +2572,11 @@ def write(state: State, site_dir: Path, *, api_version: str, now: dt.datetime) -
         entry = company.to_json()
         entry["corporate_actions"] = [a.to_json() for a in own]
         entry["dividends"] = [a.to_json() for a in own if a.type == "dividend"]
-        as_of = company.quote.date if company.quote else status["listings"].as_of
-        _dump(base / "stocks" / f"{safe_filename(company.instrument_code)}.json", meta(as_of, stock_stale), entry)
+        # A failing market only marks its own instruments stale.
+        market = state.markets.get(company.market, status["listings"])
+        as_of = company.quote.date if company.quote else market.as_of
+        stale = status["quotes"].stale or market.stale
+        _dump(base / "stocks" / f"{safe_filename(company.instrument_code)}.json", meta(as_of, stale), entry)
 
 
 def _action_sort_key(action: CorporateAction) -> tuple:
@@ -2412,15 +2601,28 @@ def _index_data() -> dict[str, Any]:
     }
 
 
-def _dump(path: Path, meta: dict[str, Any], data: Any) -> None:
-    text = json.dumps({"meta": meta, "data": data}, separators=(",", ":"), sort_keys=True, ensure_ascii=False)
-    path.write_text(text + "\n", encoding="utf-8")
+def _encode(doc: dict[str, Any]) -> str:
+    return json.dumps(doc, separators=(",", ":"), sort_keys=True, ensure_ascii=False) + "\n"
+
+
+def _dump(path: Path, meta: dict[str, Any], data: Any) -> bool:
+    """Write the file unless only `generated_at` would change. Returns True if written."""
+    if path.exists():
+        old_text = path.read_text(encoding="utf-8")
+        try:
+            old_generated_at = json.loads(old_text)["meta"]["generated_at"]
+        except (ValueError, KeyError, TypeError):
+            old_generated_at = None
+        if old_generated_at and _encode({"meta": {**meta, "generated_at": old_generated_at}, "data": data}) == old_text:
+            return False
+    path.write_text(_encode({"meta": meta, "data": data}), encoding="utf-8")
+    return True
 ```
 
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_store_io.py -q`
-Expected: `8 passed`.
+Expected: `9 passed`.
 
 - [ ] **Step 5: Commit**
 
@@ -2440,9 +2642,13 @@ git commit -m "feat: load and write the v2 JSON tree as the persistent store" -m
 **Interfaces:**
 - Consumes: `State`, `DatasetStatus` (Task 10) and the models.
 - Produces:
-  - `ScrapeResult(trade_date, listings=None, listings_complete=False, quotes=None, indices=None, actions=None, errors={})`
+  - `ScrapeResult(trade_date, listings=None, listing_errors={}, listings_full=False, quotes=None, indices=None, actions=None, errors={})`. `listings` maps market label → companies for the pages that loaded, `listing_errors` maps label → error, and `listings_full` means every configured market was requested.
   - `merge(state: State, result: ScrapeResult, *, today: date, now: datetime, max_listing_drop_pct: float) -> list[str]` (returns warnings and mutates `state`)
-- Convention for callers: a dataset was **attempted** if its field is not `None` **or** its name is in `errors`. For listings, the caller sets `listings` to a list, possibly empty or partial, whenever listings were due.
+- Convention for callers: a dataset was **attempted** if its field is not `None` **or** its name is in `errors`. For listings, the caller sets `listings` to a dict (possibly empty) whenever any market was due.
+- Listings rules:
+  - **Per-market delisting guard:** delist only within markets whose page loaded, and hold a market's delistings (with a warning) if its page is empty or below `(1 − max_drop/100) ×` its previous listed count.
+  - **Status:** each market gets its own status. The `listings` status summarises them: stale if any market is stale, `as_of` = the oldest market refresh.
+  - **Unmatched codes:** after a full refresh, `unmatched = quote codes − known codes`.
 
 - [ ] **Step 1: Write the failing tests**
 
@@ -2461,9 +2667,9 @@ NOW = dt.datetime(2026, 11, 9, 22, 30, tzinfo=dt.timezone.utc)
 EARLIER = dt.date(2026, 11, 2)
 
 
-def company(code, symbol=None, currency="JMD", **kw):
+def company(code, symbol=None, currency="JMD", market="Main Market", **kw):
     return Company(instrument_code=code, symbol=symbol or code.split("-")[0], name=f"{code} Limited",
-                   market="Main Market", currency=currency, **kw)
+                   market=market, currency=currency, **kw)
 
 
 def quote(close, day=TODAY):
@@ -2480,83 +2686,138 @@ def merge(state, result, drop=20):
     return store.merge(state, result, today=TODAY, now=NOW, max_listing_drop_pct=drop)
 
 
-def listed_state(*codes):
+def refresh(pages, errors=None, full=True, **kw):
+    """A ScrapeResult for a listings refresh. pages: market label -> companies."""
+    return ScrapeResult(trade_date=TODAY, listings=pages, listing_errors=errors or {}, listings_full=full, **kw)
+
+
+def listed_state(*companies):
     state = State()
-    for code in codes:
-        state.companies[code] = company(code, listed_since=EARLIER)
+    for c in companies:
+        c.listed_since = EARLIER
+        state.companies[c.instrument_code] = c
+        state.markets[c.market] = store.DatasetStatus(as_of=EARLIER)
     state.status["listings"] = store.DatasetStatus(as_of=EARLIER)
     return state
+
+
+def main_market(*codes):
+    return [company(code) for code in codes]
 
 
 # --- listings -------------------------------------------------------------
 
 def test_new_listings_get_listed_since_today_and_status_updates():
     state = State()
-    merge(state, ScrapeResult(trade_date=TODAY, listings=[company("ACME-JMD")], listings_complete=True))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD")}))
     assert state.companies["ACME-JMD"].listed_since == TODAY
-    assert state.status["listings"] == store.DatasetStatus(as_of=TODAY, fetched_at=NOW, stale=False, last_error=None)
+    fresh = store.DatasetStatus(as_of=TODAY, fetched_at=NOW, stale=False, last_error=None)
+    assert state.status["listings"] == fresh
+    assert state.markets == {"Main Market": fresh}
 
 
 def test_listing_update_keeps_listed_since_and_quote():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     state.companies["ACME-JMD"].quote = quote("10")
     renamed = company("ACME-JMD", sector="Retail")
     renamed.name = "Acme Group Limited"
-    merge(state, ScrapeResult(trade_date=TODAY, listings=[renamed], listings_complete=True))
+    merge(state, refresh({"Main Market": [renamed]}))
     acme = state.companies["ACME-JMD"]
     assert acme.name == "Acme Group Limited" and acme.sector == "Retail"
     assert acme.listed_since == EARLIER
     assert acme.quote == quote("10")
 
 
-def test_missing_instrument_is_delisted_when_refresh_complete():
-    state = listed_state(*[f"C{i}-JMD" for i in range(10)])
-    seen = [company(f"C{i}-JMD") for i in range(9)]
-    warnings = merge(state, ScrapeResult(trade_date=TODAY, listings=seen, listings_complete=True))
+def test_missing_instrument_is_delisted():
+    state = listed_state(*main_market(*[f"C{i}-JMD" for i in range(10)]))
+    warnings = merge(state, refresh({"Main Market": main_market(*[f"C{i}-JMD" for i in range(9)])}))
     gone = state.companies["C9-JMD"]
     assert gone.listed is False and gone.delisted_on == TODAY
     assert warnings == []
 
 
-def test_delisting_held_when_refresh_incomplete():
-    state = listed_state("ACME-JMD", "BETA-JMD")
-    result = ScrapeResult(trade_date=TODAY, listings=[company("ACME-JMD")], listings_complete=False,
-                          errors={"listings": "market 22 (Junior Market): FetchError: boom"})
-    warnings = merge(state, result)
+def test_failed_market_keeps_its_instruments_and_only_it_goes_stale():
+    state = listed_state(company("ACME-JMD"), company("BETA-JMD", market="Junior Market"))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD")},
+                         errors={"Junior Market": "FetchError: boom"}))
     assert state.companies["BETA-JMD"].listed is True
-    assert any("Delisting held" in w for w in warnings)
+    assert state.markets["Main Market"].stale is False and state.markets["Main Market"].as_of == TODAY
+    assert state.markets["Junior Market"].stale is True
+    assert state.markets["Junior Market"].as_of == EARLIER  # not advanced -> retried next run
     assert state.status["listings"].stale is True
-    assert state.status["listings"].as_of == EARLIER  # not advanced -> refresh due again next run
+    assert state.status["listings"].last_error == "Junior Market: FetchError: boom"
+    assert state.status["listings"].as_of == EARLIER  # oldest market refresh
 
 
-def test_delisting_held_when_listed_count_drops_too_far():
-    state = listed_state(*[f"C{i}-JMD" for i in range(10)])
-    seen = [company(f"C{i}-JMD") for i in range(7)]  # 7 < 0.8 * 10
-    warnings = merge(state, ScrapeResult(trade_date=TODAY, listings=seen, listings_complete=True))
+def test_market_recovers_and_listings_stop_being_stale():
+    state = listed_state(company("ACME-JMD"), company("BETA-JMD", market="Junior Market"))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD")}, errors={"Junior Market": "FetchError: boom"}))
+    merge(state, refresh({"Junior Market": [company("BETA-JMD", market="Junior Market")]}, full=False))
+    assert state.status["listings"] == store.DatasetStatus(as_of=TODAY, fetched_at=NOW, stale=False, last_error=None)
+
+
+def test_delisting_held_when_a_market_drops_too_far():
+    state = listed_state(*main_market(*[f"C{i}-JMD" for i in range(10)]))
+    warnings = merge(state, refresh({"Main Market": main_market(*[f"C{i}-JMD" for i in range(7)])}))  # 7 < 8
     assert all(c.listed for c in state.companies.values())
-    assert any("Delisting held" in w for w in warnings)
+    assert any("Delisting held for Main Market" in w for w in warnings)
+
+
+def test_empty_page_for_a_small_market_does_not_delist_it():
+    mains = main_market(*[f"M{i}-JMD" for i in range(100)])
+    usd = [company(f"U{i}-USD", currency="USD", market="USD Market") for i in range(10)]
+    state = listed_state(*mains, *usd)
+    warnings = merge(state, refresh({"Main Market": main_market(*[f"M{i}-JMD" for i in range(100)]),
+                                     "USD Market": []}))
+    assert all(c.listed for c in state.companies.values())
+    assert warnings == ["Delisting held for USD Market: 0 instrument(s) on the page vs 10 previously listed "
+                        "(max drop 20%)"]
+
+
+def test_instrument_moving_market_is_not_delisted():
+    state = listed_state(company("ACME-JMD", market="Junior Market"))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD"), "Junior Market": []}))
+    assert state.companies["ACME-JMD"].listed is True
+    assert state.companies["ACME-JMD"].market == "Main Market"
 
 
 def test_relisting_clears_delisted_on():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     state.companies["ACME-JMD"].listed = False
     state.companies["ACME-JMD"].delisted_on = EARLIER
-    merge(state, ScrapeResult(trade_date=TODAY, listings=[company("ACME-JMD")], listings_complete=True))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD")}))
     assert state.companies["ACME-JMD"].listed is True
     assert state.companies["ACME-JMD"].delisted_on is None
     assert state.companies["ACME-JMD"].listed_since == EARLIER
 
 
 def test_listings_not_attempted_leaves_status_alone():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     merge(state, ScrapeResult(trade_date=TODAY))
     assert state.status["listings"] == store.DatasetStatus(as_of=EARLIER)
+    assert state.markets == {"Main Market": store.DatasetStatus(as_of=EARLIER)}
+
+
+def test_full_refresh_remembers_unmatched_quote_codes_until_they_appear():
+    state = listed_state(*main_market("ACME-JMD"))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD")},
+                         quotes={"ACME-JMD": quote("1"), "GAMMA-JMD": quote("2")}, indices=[]))
+    assert state.unmatched == {"GAMMA-JMD"}
+    merge(state, refresh({"Main Market": main_market("ACME-JMD", "GAMMA-JMD")}, full=False))
+    assert state.unmatched == set()
+
+
+def test_partial_refresh_does_not_record_unmatched_codes():
+    state = listed_state(*main_market("ACME-JMD"))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD")}, full=False,
+                         quotes={"GAMMA-JMD": quote("2")}, indices=[]))
+    assert state.unmatched == set()
 
 
 # --- quotes and indices ---------------------------------------------------
 
 def test_quotes_replace_present_and_keep_absent():
-    state = listed_state("ACME-JMD", "BETA-JMD")
+    state = listed_state(*main_market("ACME-JMD", "BETA-JMD"))
     state.companies["BETA-JMD"].quote = quote("5", day=EARLIER)
     merge(state, ScrapeResult(trade_date=TODAY, quotes={"ACME-JMD": quote("12")}, indices=[]))
     assert state.companies["ACME-JMD"].quote == quote("12")
@@ -2565,14 +2826,14 @@ def test_quotes_replace_present_and_keep_absent():
 
 
 def test_unknown_quote_is_skipped_with_warning():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     warnings = merge(state, ScrapeResult(trade_date=TODAY, quotes={"GAMMA-JMD": quote("1")}, indices=[]))
     assert "GAMMA-JMD" not in state.companies
     assert any("GAMMA-JMD" in w for w in warnings)
 
 
 def test_holiday_keeps_quotes_indices_and_as_of():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     state.companies["ACME-JMD"].quote = quote("10", day=EARLIER)
     old_index = Index(name="JSE Main Index", date=EARLIER, value=Decimal("1"), change=None, change_pct=None, volume=None)
     state.indices = [old_index]
@@ -2594,7 +2855,7 @@ def test_indices_replaced_when_present():
 
 
 def test_failure_marks_stale_then_success_clears():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     state.status["quotes"] = store.DatasetStatus(as_of=EARLIER, fetched_at=NOW - dt.timedelta(days=7))
     merge(state, ScrapeResult(trade_date=TODAY, errors={"quotes": "BlockedError: 403", "indices": "BlockedError: 403"}))
     assert state.status["quotes"].stale is True
@@ -2607,7 +2868,7 @@ def test_failure_marks_stale_then_success_clears():
 # --- corporate actions ----------------------------------------------------
 
 def test_actions_union_without_duplicates_across_decimal_scale():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     state.actions = [action("ACME", amount="0.75")]
     merge(state, ScrapeResult(trade_date=TODAY, actions=[action("ACME", amount="0.7500"),
                                                          action("ACME", amount="0.80")]))
@@ -2616,7 +2877,7 @@ def test_actions_union_without_duplicates_across_decimal_scale():
 
 
 def test_actions_are_never_deleted():
-    state = listed_state("ACME-JMD")
+    state = listed_state(*main_market("ACME-JMD"))
     state.actions = [action("ACME", record=dt.date(2026, 1, 15))]
     merge(state, ScrapeResult(trade_date=TODAY, actions=[]))
     assert len(state.actions) == 1
@@ -2645,7 +2906,7 @@ def test_action_mapping_rules():
 def test_stored_unmapped_actions_get_mapped_once_listings_arrive():
     state = State()
     state.actions = [action("ACME")]
-    merge(state, ScrapeResult(trade_date=TODAY, listings=[company("ACME-JMD")], listings_complete=True))
+    merge(state, refresh({"Main Market": main_market("ACME-JMD")}))
     assert state.actions[0].instrument_code == "ACME-JMD"
 ```
 
@@ -2667,8 +2928,9 @@ class ScrapeResult:
     """What one run fetched. A field left as None (and absent from errors) was not attempted."""
 
     trade_date: dt.date
-    listings: list[Company] | None = None
-    listings_complete: bool = False
+    listings: dict[str, list[Company]] | None = None  # market label -> companies, for pages that loaded
+    listing_errors: dict[str, str] = field(default_factory=dict)  # market label -> error
+    listings_full: bool = False  # every configured market was requested this run
     quotes: dict[str, Quote] | None = None
     indices: list[Index] | None = None
     actions: list[CorporateAction] | None = None
@@ -2686,35 +2948,37 @@ def merge(
     warnings: list[str] = []
     errors = result.errors
 
-    if result.listings is not None or "listings" in errors:
-        complete = result.listings_complete and "listings" not in errors
-        warnings += _merge_listings(state, result.listings or [], complete=complete, today=today,
+    if result.listings is not None or result.listing_errors:
+        warnings += _merge_listings(state, result.listings or {}, result.listing_errors, today=today, now=now,
                                     max_drop_pct=max_listing_drop_pct)
-        _mark(state, "listings", errors.get("listings"), now, as_of=today)
+        if result.listings_full and result.quotes is not None:
+            # Whatever a full refresh couldn't explain won't trigger another refresh tomorrow.
+            state.unmatched = set(result.quotes) - set(state.companies)
 
     if result.quotes is not None or "quotes" in errors:
         if result.quotes is not None:
             warnings += _merge_quotes(state, result.quotes)
-        _mark(state, "quotes", errors.get("quotes"), now, as_of=result.trade_date if result.quotes else None)
+        _mark(state.status["quotes"], errors.get("quotes"), now, as_of=result.trade_date if result.quotes else None)
 
     if result.indices is not None or "indices" in errors:
         if result.indices:
             state.indices = list(result.indices)
-        _mark(state, "indices", errors.get("indices"), now, as_of=result.trade_date if result.indices else None)
+        _mark(state.status["indices"], errors.get("indices"), now,
+              as_of=result.trade_date if result.indices else None)
 
     if result.actions is not None or "corporate_actions" in errors:
         if result.actions is not None:
             _merge_actions(state, result.actions)
-        _mark(state, "corporate_actions", errors.get("corporate_actions"), now, as_of=today)
+        _mark(state.status["corporate_actions"], errors.get("corporate_actions"), now, as_of=today)
 
+    state.unmatched -= set(state.companies)
     _assign_instrument_codes(state)
     for warning in warnings:
         log.warning(warning)
     return warnings
 
 
-def _mark(state: State, name: str, error: str | None, now: dt.datetime, *, as_of: dt.date | None) -> None:
-    status = state.status[name]
+def _mark(status: DatasetStatus, error: str | None, now: dt.datetime, *, as_of: dt.date | None) -> None:
     if error:
         status.stale = True
         status.last_error = error
@@ -2726,37 +2990,57 @@ def _mark(state: State, name: str, error: str | None, now: dt.datetime, *, as_of
         status.as_of = as_of
 
 
-def _merge_listings(state: State, companies: list[Company], *, complete: bool, today: dt.date,
-                    max_drop_pct: float) -> list[str]:
-    previously_listed = {code for code, c in state.companies.items() if c.listed}
-    seen: set[str] = set()
-    for new in companies:
-        seen.add(new.instrument_code)
-        old = state.companies.get(new.instrument_code)
-        if old is None:
-            new.listed, new.listed_since, new.delisted_on = True, today, None
-            state.companies[new.instrument_code] = new
-            continue
-        old.symbol, old.name, old.market = new.symbol, new.name, new.market
-        old.currency, old.sector, old.type, old.website = new.currency, new.sector, new.type, new.website
-        old.listed, old.delisted_on = True, None
+def _merge_listings(state: State, pages: dict[str, list[Company]], failed: dict[str, str], *,
+                    today: dt.date, now: dt.datetime, max_drop_pct: float) -> list[str]:
+    warnings: list[str] = []
+    seen = {c.instrument_code for companies in pages.values() for c in companies}
+    listed_before = {
+        label: {code for code, c in state.companies.items() if c.listed and c.market == label} for label in pages
+    }
+    for companies in pages.values():
+        for new in companies:
+            old = state.companies.get(new.instrument_code)
+            if old is None:
+                new.listed, new.listed_since, new.delisted_on = True, today, None
+                state.companies[new.instrument_code] = new
+                continue
+            old.symbol, old.name, old.market = new.symbol, new.name, new.market
+            old.currency, old.sector, old.type, old.website = new.currency, new.sector, new.type, new.website
+            old.listed, old.delisted_on = True, None
 
-    missing = previously_listed - seen
-    if not missing:
-        return []
-    if not complete:
-        return [f"Delisting held: listings refresh incomplete; {len(missing)} previously listed instrument(s) not seen"]
-    floor = (1 - max_drop_pct / 100) * len(previously_listed)
-    if len(seen) < floor:
-        return [
-            f"Delisting held: only {len(seen)} instruments seen vs {len(previously_listed)} previously listed "
-            f"(max drop {max_drop_pct:g}%)"
-        ]
-    for code in sorted(missing):
-        state.companies[code].listed = False
-        state.companies[code].delisted_on = today
-    log.info("Delisted %d instrument(s): %s", len(missing), ", ".join(sorted(missing)))
-    return []
+    # Delist per market, and only for markets whose page loaded. Each market has its own guard,
+    # so an empty or truncated page for a small market can't delist it wholesale.
+    for label in sorted(pages):
+        previous = listed_before[label]
+        missing = previous - seen
+        if missing:
+            found = len({c.instrument_code for c in pages[label]})
+            floor = (1 - max_drop_pct / 100) * len(previous)
+            if found == 0 or found < floor:
+                warnings.append(
+                    f"Delisting held for {label}: {found} instrument(s) on the page vs {len(previous)} "
+                    f"previously listed (max drop {max_drop_pct:g}%)"
+                )
+            else:
+                for code in sorted(missing):
+                    state.companies[code].listed = False
+                    state.companies[code].delisted_on = today
+                log.info("Delisted %d %s instrument(s): %s", len(missing), label, ", ".join(sorted(missing)))
+        _mark(state.markets.setdefault(label, DatasetStatus()), None, now, as_of=today)
+
+    for label, error in failed.items():
+        _mark(state.markets.setdefault(label, DatasetStatus()), error, now, as_of=None)
+
+    # The listings dataset summarises its markets. as_of is the oldest successful refresh.
+    summary = state.status["listings"]
+    stale = sorted(label for label, m in state.markets.items() if m.stale)
+    summary.stale = bool(stale)
+    summary.last_error = "; ".join(f"{label}: {state.markets[label].last_error}" for label in stale) or None
+    if pages:
+        summary.fetched_at = now
+    dates = [m.as_of for m in state.markets.values() if m.as_of]
+    summary.as_of = min(dates) if dates else None
+    return warnings
 
 
 def _merge_quotes(state: State, quotes: dict[str, Quote]) -> list[str]:
@@ -2804,7 +3088,7 @@ def _match_code(action: CorporateAction, by_symbol: dict[str, list[Company]]) ->
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_store_merge.py -q`, then the full suite with `.venv/bin/pytest -q`.
-Expected: `16 passed`, and the full suite all green.
+Expected: `21 passed`, and the full suite all green.
 
 - [ ] **Step 5: Commit**
 
@@ -2829,9 +3113,10 @@ git commit -m "feat: merge scrapes into stored state with delisting guard and st
 - Produces:
   - path templates `QUOTES_PATH`, `LISTINGS_PATH`, `ACTIONS_PATH`
   - `trading_day(day: date) -> date`
-  - `listings_due(state, quotes, today, every_days, force) -> str | None`
+  - `listings_due(state, quotes, markets, today, every_days, force) -> tuple[list[int], str | None]`. Returns every market for `--refresh-listings`, no stored listings, or a quote code that is neither known nor in `state.unmatched`. Otherwise it returns only the markets that are stale (retried alone, daily) or older than `every_days`.
+  - `actions_from_date(status, window_days, backfill_from) -> date`: `backfill_from` until the first success, then `max(backfill_from, last success − window_days)`, so an outage is caught up.
   - `Report(trade_date, requests, errors, warnings, listings_refresh, counts)` with `.exit_code` and `.summary_markdown()`
-  - `run(config, site_dir, fetcher, *, now, refresh_listings=False) -> Report`
+  - `run(config, site_dir, fetcher, *, now, refresh_listings=False) -> Report`. Warnings logged by `jamstockex.parse` during the run are copied into `Report.warnings`, so they appear in the GitHub step summary.
   - `main(argv=None) -> int` in `__main__.py`, which returns 0 on success, 1 if any dataset failed, and 2 on a config error
 
 - [ ] **Step 1: Write the failing tests**
@@ -2851,7 +3136,9 @@ from tests.helpers import JSE_URL, ROOT, assert_envelope, fixture_html, read_jso
 
 NOV_9 = dt.datetime(2026, 11, 9, 22, 30, tzinfo=dt.timezone.utc)   # Monday 17:30 in Jamaica
 NOV_10 = dt.datetime(2026, 11, 10, 22, 30, tzinfo=dt.timezone.utc)
+NOV_11 = dt.datetime(2026, 11, 11, 22, 30, tzinfo=dt.timezone.utc)
 NOV_16 = dt.datetime(2026, 11, 16, 22, 30, tzinfo=dt.timezone.utc)
+DEC_24 = dt.datetime(2026, 12, 24, 22, 30, tzinfo=dt.timezone.utc)
 
 
 class FakeFetcher:
@@ -2943,7 +3230,7 @@ def test_next_day_needs_only_two_requests(config, tmp_path):
     report, fetcher = run(config, tmp_path, NOV_10)
     assert fetcher.paths == [
         "/trading/trade-quotes/?market=50&date=2026-11-10",
-        "/trading/corporate-actions/?instrumentCode=all-stocks&fromDate=2026-10-11&thruDate=2027-11-10",
+        "/trading/corporate-actions/?instrumentCode=all-stocks&fromDate=2026-10-10&thruDate=2027-11-10",
     ]
     assert report.requests == 2 and report.listings_refresh is None
     assert read_json(tmp_path / "v2" / "status.json")["data"]["quotes"]["as_of"] == "2026-11-10"
@@ -2964,6 +3251,12 @@ def test_unknown_instrument_in_quotes_triggers_listings_refresh(config, tmp_path
     assert "unknown instrument" in report.listings_refresh
     assert any("GAMMA-JMD" in w for w in report.warnings)  # still unknown after refresh
 
+    # The refresh couldn't explain GAMMA-JMD, so it doesn't trigger another one the next day.
+    report, fetcher = run(config, tmp_path, NOV_11, {"/trading/trade-quotes/": gamma})
+    assert report.requests == 2 and report.listings_refresh is None
+    status = read_json(tmp_path / "v2" / "status.json")["data"]
+    assert status["listings"]["unmatched_codes"] == ["GAMMA-JMD"]
+
 
 def test_refresh_flag_forces_listings(config, tmp_path):
     run(config, tmp_path, NOV_9)
@@ -2980,6 +3273,57 @@ def test_failed_dataset_publishes_the_rest_and_exits_1(config, tmp_path):
     assert status["corporate_actions"]["stale"] is True
     assert status["quotes"]["stale"] is False
     assert read_json(tmp_path / "v2" / "stocks.json")["data"][0]["quote"] is not None
+
+
+def test_failed_market_is_retried_alone_and_only_its_stocks_go_stale(config, tmp_path):
+    report, _ = run(config, tmp_path, NOV_9, {"/listings/listed-companies/?market=51": FetchError("boom")})
+    assert report.exit_code == 1
+    assert report.errors["listings"] == "Bond Market: FetchError: boom"
+    assert read_json(tmp_path / "v2" / "stocks" / "ACME-JMD.json")["meta"]["stale"] is False  # Main Market
+    assert read_json(tmp_path / "v2" / "status.json")["data"]["listings"]["markets"]["Bond Market"]["stale"] is True
+
+    report, fetcher = run(config, tmp_path, NOV_10)
+    assert [p for p in fetcher.paths if p.startswith("/listings/")] == ["/listings/listed-companies/?market=51"]
+    assert report.requests == 3 and report.listings_refresh == "retrying failed market(s): Bond Market"
+    assert report.exit_code == 0
+    assert read_json(tmp_path / "v2" / "status.json")["data"]["listings"]["stale"] is False
+
+
+def test_quotes_layout_change_fails_the_run(config, tmp_path):
+    run(config, tmp_path, NOV_9)
+    renamed = fixture_html("trade-quotes.html").replace("Closing Price ($)", "Close ($)").replace(
+        "Last Traded Price ($)", "Last ($)")
+    report, _ = run(config, tmp_path, NOV_10, {"/trading/trade-quotes/": renamed})
+    assert report.exit_code == 1
+    assert report.errors["quotes"].startswith("ParseError: trade-quotes: no quotes table")
+    assert read_json(tmp_path / "v2" / "status.json")["data"]["quotes"]["stale"] is True
+
+
+def test_missing_optional_column_is_reported(config, tmp_path):
+    no_volume = fixture_html("trade-quotes.html").replace("<th>Price Change ($)</th><th>Volume</th>",
+                                                         "<th>Price Change ($)</th><th>Shares</th>")
+    report, _ = run(config, tmp_path, NOV_9, {"/trading/trade-quotes/": no_volume})
+    assert report.exit_code == 0
+    assert "trade-quotes: column(s) not found, values will be null: volume" in report.warnings
+    assert "### Warnings" in report.summary_markdown()
+
+
+def test_corporate_actions_catch_up_after_an_outage(config, tmp_path):
+    run(config, tmp_path, NOV_9)
+    _, fetcher = run(config, tmp_path, DEC_24)  # 45 days later, longer than the 30-day window
+    assert fetcher.paths[-1] == (
+        "/trading/corporate-actions/?instrumentCode=all-stocks&fromDate=2026-10-10&thruDate=2027-12-24"
+    )
+
+
+def test_holiday_rewrites_only_files_whose_content_changed(config, tmp_path):
+    run(config, tmp_path, NOV_9)
+    base = tmp_path / "v2"
+    before = {p: p.read_text(encoding="utf-8") for p in base.rglob("*.json")}
+    run(config, tmp_path, NOV_10, {"/trading/trade-quotes/": fixture_html("trade-quotes-holiday.html")})
+    changed = sorted(str(p.relative_to(base)) for p, text in before.items() if p.read_text(encoding="utf-8") != text)
+    # status.json is the heartbeat (fetched_at); corporate actions were re-fetched (as_of advances).
+    assert changed == ["corporate-actions.json", "dividends.json", "status.json"]
 
 
 def test_block_stops_all_requests_and_marks_everything_stale(config, tmp_path):
@@ -3053,20 +3397,57 @@ def trading_day(day: dt.date) -> dt.date:
     return day
 
 
-def listings_due(state: store.State, quotes: dict[str, Quote] | None, today: dt.date,
-                 every_days: int, force: bool) -> str | None:
-    """Why listings should be refreshed this run, or None if they shouldn't."""
+def listings_due(state: store.State, quotes: dict[str, Quote] | None, markets: dict[int, str],
+                 today: dt.date, every_days: int, force: bool) -> tuple[list[int], str | None]:
+    """Which listing markets to fetch this run, and why. ([], None) means none."""
+    everything = list(markets)
     if force:
-        return "requested"
+        return everything, "requested"
     if not state.companies:
-        return "no stored listings"
-    last = state.status["listings"].as_of
-    if last is None or (today - last).days >= every_days:
-        return f"last refresh {last.isoformat() if last else 'never'}"
-    unknown = set(quotes or {}) - set(state.companies)
+        return everything, "no stored listings"
+    # Codes a full refresh already failed to explain (state.unmatched) don't trigger another one.
+    unknown = set(quotes or {}) - set(state.companies) - state.unmatched
     if unknown:
-        return f"{len(unknown)} unknown instrument(s) in quotes"
-    return None
+        return everything, f"{len(unknown)} unknown instrument(s) in quotes"
+
+    def status(label: str) -> store.DatasetStatus:
+        return state.markets.get(label, store.DatasetStatus())
+
+    retry = [code for code, label in markets.items() if status(label).stale]
+    aged = [
+        code for code, label in markets.items()
+        if code not in retry and (status(label).as_of is None or (today - status(label).as_of).days >= every_days)
+    ]
+    reasons = []
+    if aged:
+        oldest = min((status(markets[c]).as_of for c in aged if status(markets[c]).as_of), default=None)
+        reasons.append(f"last refresh {oldest.isoformat() if oldest else 'never'}")
+    if retry:
+        reasons.append("retrying failed market(s): " + ", ".join(markets[c] for c in retry))
+    due = [code for code in markets if code in retry or code in aged]
+    return due, "; ".join(reasons) or None
+
+
+def actions_from_date(status: store.DatasetStatus, window_days: int, backfill_from: dt.date) -> dt.date:
+    """Start of the corporate-actions query.
+
+    Backfill until the first successful fetch. After that, look back `window_days` from the last
+    successful fetch, so an outage of any length is caught up on the next good run.
+    """
+    if status.as_of is None:
+        return backfill_from
+    return max(backfill_from, status.as_of - dt.timedelta(days=window_days))
+
+
+class _WarningCollector(logging.Handler):
+    """Copies parser warnings (missing columns, skipped rows) into the run report."""
+
+    def __init__(self) -> None:
+        super().__init__(logging.WARNING)
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.messages.append(record.getMessage())
 
 
 @dataclass
@@ -3105,9 +3486,22 @@ def _describe(exc: Exception) -> str:
 
 def run(config: Config, site_dir: Path, fetcher: Fetcher, *, now: dt.datetime,
         refresh_listings: bool = False) -> Report:
+    collector = _WarningCollector()
+    parse_log = logging.getLogger("jamstockex.parse")
+    parse_log.addHandler(collector)
+    try:
+        return _run(config, site_dir, fetcher, now=now, refresh_listings=refresh_listings, collector=collector)
+    finally:
+        parse_log.removeHandler(collector)
+
+
+def _run(config: Config, site_dir: Path, fetcher: Fetcher, *, now: dt.datetime, refresh_listings: bool,
+         collector: _WarningCollector) -> Report:
     today = now.astimezone(ZoneInfo(config.output.timezone)).date()
     trade_date = trading_day(today)
     state = store.load(site_dir, config.output.api_version)
+    for label in set(state.markets) - set(config.markets.values()):
+        del state.markets[label]  # market removed from config.toml
     result = store.ScrapeResult(trade_date=trade_date)
 
     # 1. Quotes first, so an unknown instrument can trigger a listings refresh in the same run.
@@ -3118,28 +3512,26 @@ def run(config: Config, site_dir: Path, fetcher: Fetcher, *, now: dt.datetime,
         log.error("Trade quotes failed: %s", exc)
         result.errors["quotes"] = result.errors["indices"] = _describe(exc)
 
-    # 2. Listings, only when due.
-    reason = listings_due(state, result.quotes, today, config.refresh.listings_every_days, refresh_listings)
-    if reason:
-        log.info("Refreshing listings: %s", reason)
-        result.listings = []
-        failures = []
-        for code, label in config.markets.items():
+    # 2. Listings, only the markets that are due.
+    due, reason = listings_due(state, result.quotes, config.markets, today,
+                               config.refresh.listings_every_days, refresh_listings)
+    if due:
+        log.info("Refreshing listings for %d market(s): %s", len(due), reason)
+        result.listings = {}
+        result.listings_full = len(due) == len(config.markets)
+        for code in due:
+            label = config.markets[code]
             try:
-                result.listings += parse_listed_companies(fetcher.get(LISTINGS_PATH.format(market=code)), label)
+                result.listings[label] = parse_listed_companies(fetcher.get(LISTINGS_PATH.format(market=code)), label)
             except (FetchError, ParseError) as exc:
                 log.error("Listings for market %s failed: %s", code, exc)
-                failures.append(f"market {code} ({label}): {_describe(exc)}")
-        result.listings_complete = not failures
-        if failures:
-            result.errors["listings"] = "; ".join(failures)
+                result.listing_errors[label] = _describe(exc)
+        if result.listing_errors:
+            result.errors["listings"] = "; ".join(f"{label}: {e}" for label, e in result.listing_errors.items())
 
-    # 3. Corporate actions: backfill on the first run, then a short window.
-    actions_status = state.status["corporate_actions"]
-    if not state.actions and actions_status.as_of is None:
-        from_date = config.refresh.backfill_from
-    else:
-        from_date = today - dt.timedelta(days=config.refresh.corporate_actions_window)
+    # 3. Corporate actions: backfill until the first success, then from the last success minus the window.
+    from_date = actions_from_date(state.status["corporate_actions"], config.refresh.corporate_actions_window,
+                                  config.refresh.backfill_from)
     thru_date = today + dt.timedelta(days=config.refresh.corporate_actions_forward)
     try:
         html = fetcher.get(ACTIONS_PATH.format(from_date=from_date.isoformat(), thru_date=thru_date.isoformat()))
@@ -3156,7 +3548,7 @@ def run(config: Config, site_dir: Path, fetcher: Fetcher, *, now: dt.datetime,
         trade_date=trade_date,
         requests=fetcher.request_count,
         errors=dict(result.errors),
-        warnings=warnings,
+        warnings=collector.messages + warnings,
         listings_refresh=reason,
         counts={
             "instruments": len(state.companies),
@@ -3223,7 +3615,7 @@ if __name__ == "__main__":
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `.venv/bin/pytest tests/test_build.py -q`, then the full suite with `.venv/bin/pytest -q`.
-Expected: `14 passed`, and the full suite all green.
+Expected: `19 passed`, and the full suite all green.
 
 - [ ] **Step 6: Commit**
 
@@ -3742,7 +4134,16 @@ Tell the user:
 | §9 testing | each task, plus Task 9 for real pages |
 | §10 gate and risks | Tasks 1, 15 |
 
+**Review revision (2026-11-09):** fixes 1–8 from the plan review. The plan's code was extracted and run: 151 passed, 22 real-page tests skipped.
+- Fix 1, quotes ParseError: Task 7.
+- Fix 2, unmatched codes: Tasks 10–12.
+- Fixes 3 and 4, per-market status and delisting guard: Tasks 10–12.
+- Fix 5, column warnings in the summary: Tasks 5–8 and 12.
+- Fix 6, corporate-actions catch-up: Task 12.
+- Fix 7, unchanged files not rewritten: Task 10.
+- Fix 8, broader probe and real-page checks: Tasks 1 and 9.
+
 **Type consistency:** checked across tasks.
-- `ScrapeResult` fields, `merge(..., today, now, max_listing_drop_pct)`, `write(..., api_version, now)` and `load(site_dir, api_version)` are used identically in Tasks 10, 11 and 12.
+- `ScrapeResult` fields (`listings` dict, `listing_errors`, `listings_full`), `merge(..., today, now, max_listing_drop_pct)`, `write(..., api_version, now)` and `load(site_dir, api_version)` are used identically in Tasks 10, 11 and 12.
 - `Fetcher.request_count` and `blocked` are mirrored by `FakeFetcher`.
 - `parse_trade_quotes` returns a `(dict, list)` tuple everywhere it's used.
