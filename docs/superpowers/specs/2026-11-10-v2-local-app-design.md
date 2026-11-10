@@ -106,7 +106,8 @@ LICENSE  NOTICE  README.md  CLAUDE.md
   - It replaces BeautifulSoup.
 - **`parse.py`:** the same rules as the superseded spec §3.2, on `html.Table`:
   - **Header matching:** columns are matched by normalized header name through alias tables. A required table or header that is missing raises `ParseError(page, problem)`.
-  - **Quotes table is required:** the trade-quotes page needs its quotes table. On a holiday it shows the header with no rows. A missing indices table only warns.
+  - **Real layout** (checked against saved pages, 2026-11-10): the site sends every table twice (desktop and mobile copies), so rows are de-duplicated and a skipped row in both copies counts once. `instrument_code` is the numeric ID in each row's `?instrument=` link (e.g. `9001` in the fixtures), the same on the listings, trade-quotes and corporate-actions pages. No page is paginated. The committed synthetic fixtures copy these layouts and header texts with fake companies.
+  - **Quotes table is required:** the trade-quotes page needs its quotes table, except on a date with no trading: then the site sends no tables, only the message "Looks like there is no data coming back.", and the parser returns no quotes and no indices. A page without a quotes table and without that message raises `ParseError`. A missing indices table only warns.
   - **Warnings and skipped rows:** an unmatched optional column logs one warning per page. Skipped rows are counted once per page. Rows missing `instrument_code` or `symbol` (listings, quotes), or `symbol` or `type` (actions), are skipped.
   - **Original case kept.** Value parsers return `None` for anything unparseable, never 0.
   - **Page parsers:** `parse_listed_companies(html, market_label) -> list[Company]`, `parse_trade_quotes(html, trade_date) -> (dict[str, Quote], list[Index])`, `parse_corporate_actions(html) -> list[CorporateAction]`.
@@ -235,7 +236,7 @@ Filters are exact, case-insensitive matches. An unknown filter name or an invali
 **`meta` fields:**
 - **`as_of`:** the trading date of the data in that response.
 - **`saved_at`:** when `jse-data.json` was last saved.
-- **`stale`:** true if the relevant dataset's latest due fetch failed. Per-stock responses use `quotes.stale OR <stock's market>.stale`.
+- **`stale`:** true if the relevant dataset's latest due fetch failed, or the no-data safety net fired (§6.2). Per-stock responses use `quotes.stale OR <stock's market>.stale`.
 
 **Data shapes:** stock entries, corporate actions and indices keep the superseded spec's §5 shapes and conventions:
 - keyed by `instrument_code`;
@@ -272,7 +273,7 @@ Filters are exact, case-insensitive matches. An unknown filter name or an invali
 ### 6.1 When a refresh is due
 
 - **`latest_close(now)`:** the most recent weekday `D` (in America/Jamaica) whose `D close_time` is ≤ `now`. Before 17:30 on a weekday, that is the previous weekday. On a weekend, it is Friday. The trade date requested is `D`.
-- **Quotes, indices and corporate actions** are due when `status.quotes.fetched_at < latest_close`. A holiday counts as a successful fetch (zero rows), so there is at most one successful refresh per trading day.
+- **Quotes, indices and corporate actions** are due when `status.quotes.fetched_at < latest_close`. A holiday (the site's "no data" page) counts as a successful fetch (zero rows), so there is at most one successful refresh per trading day.
 - **Listings** (per market), as in the superseded spec §3.3:
   - all markets: `--listings`, no stored listings, an unknown quote code not already in `unmatched_codes`, or the market's last refresh ≥ `listings_every_days` ago;
   - one market alone: its last fetch failed.
@@ -296,6 +297,8 @@ These are unchanged from the superseded spec §6.1–§6.2:
 - `unmatched_codes` accumulate and leave when found;
 - the corporate-actions union with dedupe key `(symbol, type, record_date, ex_date, payment_date, amount, currency)`, never deleting;
 - `last_error` set and cleared.
+
+**No-data safety net** (new): `status.quotes.no_data_days` counts successful quotes refreshes in a row that returned no quotes; any refresh with a quote resets it to 0, and a failed fetch leaves it alone. At 3, quotes and indices are marked stale with `last_error` "No trade data for 3 trading days in a row; the site may have changed", and the report warns. It is not a failure or a block: there is no retry wait, and the next close is fetched as usual. `/v2/status` shows `no_data_days` on quotes while it is above 0.
 
 Reports count companies added, updated and delisted, and actions added.
 
@@ -364,7 +367,7 @@ Reports count companies added, updated and delisted, and actions added.
    - combined trade quotes for a trading day and for a public holiday;
    - corporate actions with a `thruDate` a year ahead.
 
-   The pages are used only to verify the parsers. They confirm the header names, the `instrument_code` format, the absence of pagination, and holiday behaviour. Pagination, or a holiday answered with the previous session's data, is a stop-and-redesign point.
+   The pages are used only to verify the parsers. They confirm the header names, the `instrument_code` format, the absence of pagination, and holiday behaviour. Pagination, or a holiday answered with the previous session's data, is a stop-and-redesign point. Done 2026-11-10: no pagination, numeric codes on every page, and a holiday answered with a no-tables "no data" page (§3.2).
 2. TDD in this order: `config`, `models`, `fetch`, `html`, `parse`, `store`, `refresh`, `server` with `openapi.json` and the docs, then `__main__`.
 3. `ci.yml`, `release.yml`, legal files, README, CLAUDE.md; remove the v1 files.
 4. **Live check by the user:** `jamstockex refresh` from their own computer. Success is the goal. A clear blocked message, with no crash and stored data still served, is the acceptable failure mode, and it is reported to the user.
@@ -389,6 +392,7 @@ Reports count companies added, updated and delisted, and actions added.
   - `latest_close` across weekday before and after 17:30, Friday night, Saturday, Sunday and Monday morning;
   - at most one successful refresh per close;
   - holiday;
+  - the no-data counter: increments, resets on a quote, and marks quotes and indices stale at 3 days;
   - the retry wait after failure;
   - no retry after a block until the next close;
   - per-market listings and `unmatched_codes`;
@@ -408,10 +412,11 @@ Reports count companies added, updated and delisted, and actions added.
   - `--offline` makes no fetcher calls;
   - `--version`.
 - **Standard library only:** an `ast` scan of `jamstockex/` imports against `sys.stdlib_module_names`.
-- **Real-page checks** (`tests/test_parse_real.py`, local only, skipped when the pages are absent): every alias matches, holiday → zero quotes, market labels match the config.
+- **Parser:** the "no data" page gives no quotes; a page with no quotes table and no such message raises `ParseError`.
+- **Real-page checks** (`tests/test_parse_real.py`, local only, skipped when the pages are absent): every alias matches on every page, the holiday page parses as a day without trading, the market labels match the config, and the listing, quote and corporate-action codes overlap.
 
 **Risks:**
 - **Automated refresh blocked from the user's connection.** Likely, given the 2026-11-09/10 results. The app then reports `blocked` and serves only stored data, with no circumvention and no import (§2, §6.3).
-- **JSE layout changes.** These surface as a `ParseError` naming the page and header; the fix is usually an alias in `parse.py`.
+- **JSE layout changes.** These surface as a `ParseError` naming the page and header; the fix is usually an alias in `parse.py`. A change that makes every day look like a "no data" day is caught by the 3-day safety net (§6.2).
 - **Unsigned binaries.** One-time OS approval, documented in the README.
 - **Intel macOS runner availability** on GitHub Actions. If no Intel runner is offered, publish only the arm64 build and point Intel Mac users to the `.pyz`.
