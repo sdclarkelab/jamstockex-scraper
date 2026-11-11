@@ -101,7 +101,7 @@ written as a `config.toml`:
 
 ```toml
 [source]
-base_url = "https://www.jamstockex.com"
+# base_url is the JSE website address (built in; set it only to use a different host)
 user_agent = "jamstockex/2.0 (+https://github.com/sdclarkelab/jamstockex-scraper)"
 timeout_s = 20
 retries = 3
