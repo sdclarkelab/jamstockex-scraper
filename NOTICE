@@ -1,0 +1,50 @@
+jamstockex-scraper
+Copyright (c) 2022-2026 Stephen Clarke (https://github.com/sdclarkelab)
+All rights not expressly granted by the license are reserved.
+
+SOFTWARE LICENSE
+
+From version 2.0.0, the source code is licensed under the PolyForm
+Noncommercial License 1.0.0 (see LICENSE). The code is source-available,
+not open source in the OSI sense: you may use, copy, modify and share it
+for noncommercial purposes only. Commercial use requires a separate written
+license from the copyright holder. To ask for one, open an issue at
+https://github.com/sdclarkelab/jamstockex-scraper/issues
+
+Versions up to and including the v1.0 tag were released under the MIT
+License and remain available under it.
+
+MARKET DATA
+
+The market data that this software collects is the property of Jamaica
+Stock Exchange Limited and its subsidiaries (the "JSE Group") and their
+licensors. It is not covered by the license above, and no rights in it
+are granted.
+
+NO AFFILIATION
+
+This project is independent. It is not affiliated with, endorsed by, or
+sponsored by the JSE Group. "Jamaica Stock Exchange" and "JSE" are marks
+of the JSE Group and are used here only to describe the source of the data.
+
+LOCAL, PERSONAL USE
+
+This software is intended for local, personal use on your own computer.
+It serves data only to that computer (127.0.0.1). It is not intended for
+hosting as a service or for republishing the data.
+
+NOT FINANCIAL ADVICE
+
+Nothing produced by this software is investment, financial, legal or tax
+advice, or a recommendation, offer or solicitation to buy or sell any
+security. The data may be late, incomplete or wrong. It is provided "as
+is", without warranty of any kind.
+
+THIRD-PARTY SOFTWARE
+
+Swagger UI (swagger-ui-dist 5.33.3), Copyright SmartBear Software Inc.,
+is included under the Apache License 2.0. Its license and notice files
+are in jamstockex/static/swagger/ (LICENSE, NOTICE and
+swagger-ui-bundle.js.LICENSE.txt).
+
+Required Notice: Copyright (c) 2022-2026 Stephen Clarke (https://github.com/sdclarkelab)
