@@ -213,3 +213,9 @@ def test_real_urllib_requests_against_a_local_server(local_server):
         fetcher.get("/blocked")
     assert _Handler.seen == [("/ok", "test-agent/1.0"), ("/busy", "test-agent/1.0"),
                              ("/busy", "test-agent/1.0"), ("/blocked", "test-agent/1.0")]
+
+
+def test_non_text_charset_falls_back_to_utf8():
+    from jamstockex.fetch import _decode
+    for charset in ("base64", "rot13", "zlib_codec"):
+        assert _decode("café".encode("utf-8"), charset) == "café"

@@ -222,3 +222,12 @@ def test_unexpected_parser_exception_is_recorded_as_a_failure_and_waits():
     assert not refresh.due(state, soon, SETTINGS).automatic_allowed(soon)
     later = NOV_9 + dt.timedelta(minutes=SETTINGS.refresh.retry_after_failure_minutes)
     assert refresh.due(state, later, SETTINGS).automatic_allowed(later)
+
+
+def test_unexpected_fetcher_exception_is_a_fetch_failure():
+    state = store.State()
+    report, _ = run(state, NOV_9, {"/trading/trade-quotes/": ValueError("boom")})
+    assert report.exit_code == 1 and report.errors["quotes"].startswith("FetchError: /trading/trade-quotes/")
+    assert "ValueError: boom" in state.status["quotes"].last_error and state.status["quotes"].stale
+    assert "jamstockex.com" not in state.status["quotes"].last_error
+    assert state.last_failure_at == NOV_9

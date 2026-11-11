@@ -209,6 +209,16 @@ def _describe(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _get(fetcher, path: str) -> str:
+    """fetcher.get, with any unexpected exception turned into a FetchError naming only the path."""
+    try:
+        return fetcher.get(path)
+    except FetchError:
+        raise
+    except Exception as exc:
+        raise FetchError(f"{path}: {_describe(exc)}") from exc
+
+
 def _parse(page: str, parse, *args):
     """Run a parser; an unexpected exception becomes a ParseError so the normal retry wait applies."""
     try:
@@ -245,7 +255,7 @@ def _run(state: store.State, fetcher, now: dt.datetime, settings: Config, force_
     # 1. Quotes first, so an unknown instrument can trigger a listings refresh in the same run.
     if plan.quotes:
         try:
-            html = fetcher.get(QUOTES_PATH.format(market=settings.combined_market, date=plan.trade_date.isoformat()))
+            html = _get(fetcher, QUOTES_PATH.format(market=settings.combined_market, date=plan.trade_date.isoformat()))
             result.quotes, result.indices = _parse("trade quotes", parse_trade_quotes, html, plan.trade_date)
         except (FetchError, ParseError) as exc:
             log.error("Trade quotes failed: %s", exc)
@@ -261,7 +271,7 @@ def _run(state: store.State, fetcher, now: dt.datetime, settings: Config, force_
         for code in codes:
             label = settings.markets[code]
             try:
-                html = fetcher.get(LISTINGS_PATH.format(market=code))
+                html = _get(fetcher, LISTINGS_PATH.format(market=code))
                 result.listings[label] = _parse(f"listings for {label}", parse_listed_companies, html, label)
             except (FetchError, ParseError) as exc:
                 log.error("Listings for %s failed: %s", label, exc)
@@ -273,7 +283,7 @@ def _run(state: store.State, fetcher, now: dt.datetime, settings: Config, force_
     if plan.corporate_actions:
         from_date, thru_date = actions_window(state.status["corporate_actions"], plan.today, settings)
         try:
-            html = fetcher.get(ACTIONS_PATH.format(from_date=from_date.isoformat(), thru_date=thru_date.isoformat()))
+            html = _get(fetcher, ACTIONS_PATH.format(from_date=from_date.isoformat(), thru_date=thru_date.isoformat()))
             result.actions = _parse("corporate actions", parse_corporate_actions, html)
         except (FetchError, ParseError) as exc:
             log.error("Corporate actions failed: %s", exc)

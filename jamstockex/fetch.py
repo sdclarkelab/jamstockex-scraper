@@ -42,9 +42,9 @@ def is_block_page(text: str) -> bool:
 def _decode(body: bytes, charset: str | None) -> str:
     try:
         codecs.lookup(charset or "utf-8")
-    except LookupError:
-        charset = "utf-8"
-    return body.decode(charset or "utf-8", errors="replace")
+        return body.decode(charset or "utf-8", errors="replace")
+    except LookupError:  # unknown, or a non-text codec such as base64 or rot13
+        return body.decode("utf-8", errors="replace")
 
 
 def _problem(exc: BaseException) -> str:

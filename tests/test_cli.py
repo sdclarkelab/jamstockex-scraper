@@ -309,3 +309,13 @@ def test_refresh_with_an_unparseable_page_exits_1_without_a_traceback(tmp_path, 
     captured = capsys.readouterr()
     assert "Traceback" not in captured.out + captured.err and "AssertionError" in captured.out
     assert store.load(tmp_path / "jse-data.json").last_failure_at is not None
+
+
+def test_refresh_with_an_unexpected_fetch_error_exits_1_without_a_traceback(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "Fetcher", lambda source: FakeFetcher(
+        pages({"/trading/trade-quotes/": ValueError("boom")})))
+    monkeypatch.setattr(cli, "utcnow", lambda: NOW)
+    assert cli.main(["refresh", "--data-dir", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err and "ValueError: boom" in captured.out
+    assert store.load(tmp_path / "jse-data.json").last_failure_at is not None
