@@ -149,7 +149,7 @@ when a `v*` tag is pushed.
 
 ## License and data
 
-- **Code:** [PolyForm Noncommercial 1.0.0](LICENSE). Copyright (c) 2022-2026 Stephen Clarke. It is free for
+- **Code:** [PolyForm Noncommercial 1.0.0](LICENSE.md). Copyright (c) 2022-2026 Stephen Clarke. It is free for
   noncommercial use; commercial use needs a separate license, so open an issue to ask. Versions up to `v1.0`
   were MIT and remain so. See [NOTICE](NOTICE).
 - **Data:** the property of Jamaica Stock Exchange Limited / the JSE Group, and not covered by the code license.
