@@ -211,9 +211,16 @@ def test_report_text():
     assert "Errors:\n  - corporate_actions: FetchError: boom" in text
 
 
-def test_unexpected_parser_exception_is_recorded_as_a_failure_and_waits():
+def _parser_crash(*args, **kwargs):
+    # Stands in for any unexpected parser failure (older CPython html.parser raised
+    # AssertionError on malformed marked sections; newer patch releases don't).
+    raise AssertionError("unknown status keyword 'foo' in marked section")
+
+
+def test_unexpected_parser_exception_is_recorded_as_a_failure_and_waits(monkeypatch):
+    monkeypatch.setattr(refresh, "parse_trade_quotes", _parser_crash)
     state = store.State()
-    report, fetcher = run(state, NOV_9, {"/trading/trade-quotes/": "<![foo[ x ]]>"})
+    report, fetcher = run(state, NOV_9, {"/trading/trade-quotes/": fixture_html("trade-quotes.html")})
     assert sum(p.startswith("/trading/trade-quotes/") for p in fetcher.paths) == 1
     assert report.exit_code == 1 and "AssertionError" in report.errors["quotes"]
     assert state.status["quotes"].stale and "AssertionError" in state.status["quotes"].last_error

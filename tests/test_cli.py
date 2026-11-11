@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 import jamstockex.__main__ as cli
+from jamstockex import refresh as refresh_module
 from jamstockex import store
 from jamstockex.config import JAMAICA, default_config
 from jamstockex.fetch import BlockedError
@@ -302,8 +303,12 @@ def test_bad_port_exits_2_with_a_message(port, capsys, no_network):
 
 
 def test_refresh_with_an_unparseable_page_exits_1_without_a_traceback(tmp_path, capsys, monkeypatch):
-    monkeypatch.setattr(cli, "Fetcher", lambda source: FakeFetcher(
-        pages({"/trading/trade-quotes/": "<![foo[ x ]]>"})))
+    def parser_crash(*args, **kwargs):
+        # Stands in for any unexpected parser failure, independent of the CPython patch release.
+        raise AssertionError("unknown status keyword 'foo' in marked section")
+
+    monkeypatch.setattr(refresh_module, "parse_trade_quotes", parser_crash)
+    monkeypatch.setattr(cli, "Fetcher", lambda source: FakeFetcher(pages()))
     monkeypatch.setattr(cli, "utcnow", lambda: NOW)
     assert cli.main(["refresh", "--data-dir", str(tmp_path)]) == 1
     captured = capsys.readouterr()
