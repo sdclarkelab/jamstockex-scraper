@@ -1,0 +1,84 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  binary:
+    name: binary (${{ matrix.asset }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { os: windows-latest, asset: jamstockex-windows-x64.exe, name: jamstockex-windows-x64 }
+          - { os: macos-15, asset: jamstockex-macos-arm64, name: jamstockex-macos-arm64 }
+          - { os: macos-15-intel, asset: jamstockex-macos-x64, name: jamstockex-macos-x64 }
+          - { os: ubuntu-22.04, asset: jamstockex-linux-x64, name: jamstockex-linux-x64 }
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install PyInstaller (build time only)
+        run: pip install pyinstaller==6.10.0
+      - name: Build one-file executable
+        shell: bash
+        run: >
+          pyinstaller --onefile --clean --noconfirm --name "${{ matrix.name }}" --paths .
+          --add-data "jamstockex/openapi.json:jamstockex"
+          --add-data "jamstockex/static:jamstockex/static"
+          .github/pyinstaller_entry.py
+      - name: Smoke test (offline, 127.0.0.1 only)
+        shell: bash
+        run: python .github/smoke_test.py --port 8765 -- "dist/${{ matrix.asset }}"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}
+          if-no-files-found: error
+
+  pyz:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Build jamstockex.pyz
+        run: python .github/build_pyz.py dist/jamstockex.pyz
+      - name: Smoke test on Python 3.11 (offline, 127.0.0.1 only)
+        run: python .github/smoke_test.py --port 8765 -- python dist/jamstockex.pyz
+      - uses: actions/upload-artifact@v4
+        with:
+          name: jamstockex.pyz
+          path: dist/jamstockex.pyz
+          if-no-files-found: error
+
+  publish:
+    needs: [binary, pyz]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: Write SHA256SUMS
+        working-directory: artifacts
+        run: |
+          sha256sum jamstockex-* jamstockex.pyz > SHA256SUMS
+          cat SHA256SUMS
+      - name: Create the GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: >
+          gh release create "$GITHUB_REF_NAME" artifacts/*
+          --title "$GITHUB_REF_NAME"
+          --notes "Local-first JSE end-of-day data app. Personal, noncommercial use only. Not financial advice. See README.md for first-run steps and SHA256SUMS to verify downloads."
