@@ -209,3 +209,16 @@ def test_report_text():
     assert "Instruments: added 2, updated 0, delisted 0 (2 stored, 2 listed)" in text
     assert "Corporate actions added: 0 (0 stored)" in text
     assert "Errors:\n  - corporate_actions: FetchError: boom" in text
+
+
+def test_unexpected_parser_exception_is_recorded_as_a_failure_and_waits():
+    state = store.State()
+    report, fetcher = run(state, NOV_9, {"/trading/trade-quotes/": "<![foo[ x ]]>"})
+    assert sum(p.startswith("/trading/trade-quotes/") for p in fetcher.paths) == 1
+    assert report.exit_code == 1 and "AssertionError" in report.errors["quotes"]
+    assert state.status["quotes"].stale and "AssertionError" in state.status["quotes"].last_error
+    assert state.last_failure_at == NOV_9
+    soon = NOV_9 + dt.timedelta(minutes=SETTINGS.refresh.retry_after_failure_minutes - 1)
+    assert not refresh.due(state, soon, SETTINGS).automatic_allowed(soon)
+    later = NOV_9 + dt.timedelta(minutes=SETTINGS.refresh.retry_after_failure_minutes)
+    assert refresh.due(state, later, SETTINGS).automatic_allowed(later)

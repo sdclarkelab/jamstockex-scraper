@@ -1,4 +1,4 @@
-"""Start a built artifact offline, check three URLs on 127.0.0.1, stop it.
+"""Start a built artifact offline, check a few URLs on 127.0.0.1, stop it.
 
 Usage: python .github/smoke_test.py [--port 8765] [--timeout 90] -- <command...>
 e.g.   python .github/smoke_test.py -- dist/jamstockex-linux-x64
@@ -15,7 +15,7 @@ import tempfile
 import time
 import urllib.request
 
-PATHS = ("/v2/status", "/docs", "/openapi.json")
+PATHS = ("/v2/status", "/docs", "/openapi.json", "/docs/assets/swagger-ui-bundle.js")
 
 
 def wait_for_port(port: int, process: subprocess.Popen, timeout: float) -> None:

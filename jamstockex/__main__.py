@@ -48,6 +48,16 @@ def default_data_dir(platform: str | None = None, env: dict[str, str] | None = N
     return home / ".local" / "share" / "jamstockex"
 
 
+def _port(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"invalid port {text!r}: use a number from 0 to 65535") from None
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError(f"invalid port {text!r}: use a number from 0 to 65535")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="jamstockex",
@@ -55,12 +65,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"jamstockex {__version__}")
     parser.add_argument("--data-dir", help="data folder (default: the per-user data folder)")
-    parser.add_argument("--port", type=int, help="serve: port on 127.0.0.1 (default 8765)")
+    parser.add_argument("--port", type=_port, help="serve: port on 127.0.0.1 (default 8765)")
     parser.add_argument("--offline", action="store_true", help="serve: don't refresh")
     commands = parser.add_subparsers(dest="command", metavar="{serve,refresh}")
     serve = commands.add_parser("serve", help="serve the API and refresh in the background (the default)")
     serve.add_argument("--data-dir", default=argparse.SUPPRESS)
-    serve.add_argument("--port", type=int, default=argparse.SUPPRESS)
+    serve.add_argument("--port", type=_port, default=argparse.SUPPRESS)
     serve.add_argument("--offline", action="store_true", default=argparse.SUPPRESS)
     refresh = commands.add_parser("refresh", help="refresh what is due now, print the report, and exit")
     refresh.add_argument("--data-dir", default=argparse.SUPPRESS)
@@ -119,6 +129,7 @@ class Service:
         self.lock: store.RefreshLock | None = None  # held only while a refresh is in flight
         self.interrupted = False
         self.next_check_at: dt.datetime | None = None
+        self.save_not_before: dt.datetime | None = None  # in-memory wait after a failed save
         self._snapshot = Snapshot.from_state(state, data_file=str(self.data_file))
 
     def snapshot(self) -> Snapshot:
@@ -131,6 +142,10 @@ class Service:
     def check(self) -> Report | None:
         """One check: a clock comparison, then a refresh only if one is due and allowed."""
         now = utcnow()
+        if self.save_not_before is not None:
+            if now < self.save_not_before:
+                return None  # keep serving the in-memory state; the file couldn't be written
+            self.save_not_before = None
         try:
             self.state = store.load(self.data_file)  # pick up a `jamstockex refresh` run meanwhile
         except store.StoreError as exc:
@@ -159,7 +174,13 @@ class Service:
             self._publish()
             report = run_refresh(self.state, Fetcher(self.config.source), now, self.config)
             if report.attempted and not self.interrupted:
-                store.save(self.state, self.data_file, now=utcnow())
+                try:
+                    store.save(self.state, self.data_file, now=utcnow())
+                except OSError as exc:
+                    wait = self.config.refresh.retry_after_failure_minutes
+                    self.save_not_before = now + dt.timedelta(minutes=wait)
+                    print(f"Can't save the data file {self.data_file}: {exc}; the new data is served from "
+                          f"memory only, and the next refresh is in {wait} minutes.", file=sys.stderr, flush=True)
         finally:
             self.refreshing = False
             lock.release()

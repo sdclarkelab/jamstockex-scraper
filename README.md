@@ -17,7 +17,7 @@ Download the file for your computer from the latest GitHub Release, plus `SHA256
 | macOS, Apple Silicon | `jamstockex-macos-arm64` |
 | macOS, Intel | `jamstockex-macos-x64` |
 | Linux (x86-64) | `jamstockex-linux-x64` |
-| Any system with Python 3.11+ | `jamstockex.pyz` (run `python3 jamstockex.pyz`) |
+| Any system with Python 3.11+ | `jamstockex.pyz` (run `python3 jamstockex.pyz`; on Windows, `py jamstockex.pyz`) |
 
 Downloaded files may not keep their "executable" permission, and your system may stop the first run
 with a warning about an unidentified app. Approve it once:
@@ -63,7 +63,7 @@ refreshed weekly. It uses one honest User-Agent and waits between requests. You 
 User-Agent with `user_agent` under `[source]` in `config.toml`, but it should keep identifying this app
 honestly rather than imitating a browser.
 
-- `jamstockex refresh` runs one refresh now and prints a report (`--listings` also refreshes every market).
+- `jamstockex refresh` refreshes whatever is due now and prints a report (`--listings` forces a refresh of every market's listings).
 - `jamstockex --offline` serves the stored data without refreshing.
 
 On a day without trading (a public holiday) the JSE site has no trade data, and the previous quotes are kept.
@@ -82,7 +82,7 @@ block. On a first run with no stored data, there is nothing to serve until a ref
 
 Data lives in your per-user data folder (change it with `--data-dir`):
 - **macOS:** `~/Library/Application Support/jamstockex/`
-- **Windows:** `%APPDATA%\jamstockex\`
+- **Windows:** `%APPDATA%\jamstockex\`, or `%USERPROFILE%\AppData\Roaming\jamstockex\` if `APPDATA` is not set
 - **Linux:** `$XDG_DATA_HOME/jamstockex/`, or `~/.local/share/jamstockex/`
 
 No configuration is needed. To change a setting, create `config.toml` in that folder with only the keys you
@@ -96,8 +96,41 @@ check_every_minutes = 30
 port = 8766
 ```
 
-The sections are `[source]`, `[markets]`, `[quotes]`, `[refresh]` and `[server]`; the defaults are in
-`jamstockex/config.py`. Unknown keys and invalid values stop the app with a message naming the key.
+The sections are `[source]`, `[markets]`, `[quotes]`, `[refresh]` and `[server]`. The built-in defaults,
+written as a `config.toml`:
+
+```toml
+[source]
+base_url = "https://www.jamstockex.com"
+user_agent = "jamstockex/2.0 (+https://github.com/sdclarkelab/jamstockex-scraper)"
+timeout_s = 20
+retries = 3
+delay_s = [2, 5]
+
+[markets]            # replaces the whole list if present
+"31" = "Main Market"
+"22" = "Junior Market"
+"51" = "Bond Market"
+"49" = "USD Market"
+
+[quotes]
+combined_market = 50
+
+[refresh]
+close_time = "17:30"
+check_every_minutes = 15
+retry_after_failure_minutes = 60
+listings_every_days = 7
+corporate_actions_window = 30
+corporate_actions_forward = 365
+backfill_from = 2026-01-01
+max_listing_drop_pct = 20
+
+[server]
+port = 8765
+```
+
+Unknown keys and invalid values stop the app with a message naming the key.
 `--port <n>` overrides the port for one run. If the port is taken, the app exits and suggests another one.
 
 Exit codes: `0` ok; `1` a dataset failed or was blocked, or another refresh is running; `2` a config,

@@ -209,6 +209,16 @@ def _describe(exc: Exception) -> str:
     return f"{type(exc).__name__}: {exc}"
 
 
+def _parse(page: str, parse, *args):
+    """Run a parser; an unexpected exception becomes a ParseError so the normal retry wait applies."""
+    try:
+        return parse(*args)
+    except (FetchError, ParseError):
+        raise
+    except Exception as exc:
+        raise ParseError(page, _describe(exc)) from exc
+
+
 def run_refresh(state: store.State, fetcher, now: dt.datetime, settings: Config,
                 force_listings: bool = False) -> Report:
     """Fetch, parse and merge whatever is due now. Mutates `state`; the caller saves it.
@@ -236,7 +246,7 @@ def _run(state: store.State, fetcher, now: dt.datetime, settings: Config, force_
     if plan.quotes:
         try:
             html = fetcher.get(QUOTES_PATH.format(market=settings.combined_market, date=plan.trade_date.isoformat()))
-            result.quotes, result.indices = parse_trade_quotes(html, plan.trade_date)
+            result.quotes, result.indices = _parse("trade quotes", parse_trade_quotes, html, plan.trade_date)
         except (FetchError, ParseError) as exc:
             log.error("Trade quotes failed: %s", exc)
             result.errors["quotes"] = result.errors["indices"] = _describe(exc)
@@ -252,7 +262,7 @@ def _run(state: store.State, fetcher, now: dt.datetime, settings: Config, force_
             label = settings.markets[code]
             try:
                 html = fetcher.get(LISTINGS_PATH.format(market=code))
-                result.listings[label] = parse_listed_companies(html, label)
+                result.listings[label] = _parse(f"listings for {label}", parse_listed_companies, html, label)
             except (FetchError, ParseError) as exc:
                 log.error("Listings for %s failed: %s", label, exc)
                 result.listing_errors[label] = _describe(exc)
@@ -264,7 +274,7 @@ def _run(state: store.State, fetcher, now: dt.datetime, settings: Config, force_
         from_date, thru_date = actions_window(state.status["corporate_actions"], plan.today, settings)
         try:
             html = fetcher.get(ACTIONS_PATH.format(from_date=from_date.isoformat(), thru_date=thru_date.isoformat()))
-            result.actions = parse_corporate_actions(html)
+            result.actions = _parse("corporate actions", parse_corporate_actions, html)
         except (FetchError, ParseError) as exc:
             log.error("Corporate actions failed: %s", exc)
             result.errors["corporate_actions"] = _describe(exc)

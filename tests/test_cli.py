@@ -270,3 +270,42 @@ def test_refresh_save_failure_exits_2_naming_the_data_file(tmp_path, capsys, fak
     err = capsys.readouterr().err
     assert str(tmp_path / "jse-data.json") in err and len(err.strip().splitlines()) == 1
     assert not (tmp_path / "jse-data.lock").exists()
+
+
+def test_service_save_failure_does_not_refetch_until_the_wait_passes(tmp_path, capsys, fake_site, monkeypatch):
+    def boom(*args, **kwargs):
+        raise PermissionError("disk full")
+
+    monkeypatch.setattr(store, "save", boom)
+    clock = [NOW]
+    monkeypatch.setattr(cli, "utcnow", lambda: clock[0])
+    service = cli.Service(default_config(), tmp_path, store.State())
+    assert service.check() is not None
+    err = capsys.readouterr().err
+    assert str(tmp_path / "jse-data.json") in err and len(err.strip().splitlines()) == 1
+    assert service.snapshot() is not None and len(fake_site) == 1
+    clock[0] = NOW + dt.timedelta(minutes=59)
+    assert service.check() is None
+    assert len(fake_site) == 1
+    clock[0] = NOW + dt.timedelta(minutes=61)
+    assert service.check() is not None
+    assert len(fake_site) == 2
+
+
+@pytest.mark.parametrize("port", ["70000", "-1", "abc"])
+def test_bad_port_exits_2_with_a_message(port, capsys, no_network):
+    with pytest.raises(SystemExit) as info:
+        cli.main(["--port", port])
+    assert info.value.code == 2
+    err = capsys.readouterr().err
+    assert "invalid port" in err and "Traceback" not in err
+
+
+def test_refresh_with_an_unparseable_page_exits_1_without_a_traceback(tmp_path, capsys, monkeypatch):
+    monkeypatch.setattr(cli, "Fetcher", lambda source: FakeFetcher(
+        pages({"/trading/trade-quotes/": "<![foo[ x ]]>"})))
+    monkeypatch.setattr(cli, "utcnow", lambda: NOW)
+    assert cli.main(["refresh", "--data-dir", str(tmp_path)]) == 1
+    captured = capsys.readouterr()
+    assert "Traceback" not in captured.out + captured.err and "AssertionError" in captured.out
+    assert store.load(tmp_path / "jse-data.json").last_failure_at is not None

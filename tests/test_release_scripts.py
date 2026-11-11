@@ -28,6 +28,7 @@ def test_smoke_test_passes_against_the_source_tree():
     assert "/v2/status -> 200" in result.stdout
     assert "/docs -> 200" in result.stdout
     assert "/openapi.json -> 200" in result.stdout
+    assert "/docs/assets/swagger-ui-bundle.js -> 200" in result.stdout
 
 
 def test_smoke_test_fails_when_the_app_exits_early():
